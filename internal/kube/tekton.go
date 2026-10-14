@@ -14,7 +14,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 // Tekton Pipelines serves its core kinds at tekton.dev/v1 (stored as v1 since
@@ -58,8 +57,8 @@ const (
 	tektonStateNotRun  = "notrun"
 )
 
-func (m *ClientManager) tektonGVR(contextName, resource string) (schema.GroupVersionResource, bool) {
-	return m.servedGVR(contextName, tektonGroup, resource)
+func tektonGR(resource string) schema.GroupResource {
+	return schema.GroupResource{Group: tektonGroup, Resource: resource}
 }
 
 // TektonParam is a name/value pair: a run's resolved param or a result.
@@ -76,34 +75,26 @@ type TektonWorkspaceBinding struct {
 	Source string `json:"source"`
 }
 
-type tektonCondition struct{ typ, status, reason, message string }
-
 // tektonRunState buckets a run's Succeeded condition into a UI state and
 // returns the condition's reason and message. Tekton runs carry that single
 // knative-style condition; a run without it has not been picked up by the
 // controller yet, or is held by PipelineRunPending.
 func tektonRunState(obj *unstructured.Unstructured) (state, reason, message string) {
-	conds := extractConditions(obj, func(t, s, reason, message, _ string) tektonCondition {
-		return tektonCondition{typ: t, status: s, reason: reason, message: message}
-	})
-	for _, c := range conds {
-		if c.typ != "Succeeded" {
-			continue
-		}
-		switch c.status {
+	if c, ok := findCondition(crConditions(obj), "Succeeded"); ok {
+		switch c.Status {
 		case "True":
-			return tektonStateSucceeded, c.reason, c.message
+			return tektonStateSucceeded, c.Reason, c.Message
 		case "False":
-			switch c.reason {
+			switch c.Reason {
 			case "Cancelled", "PipelineRunCancelled", tektonTaskRunCancelled, "StoppedRunFinally", "CancelledRunFinally":
-				return tektonStateCancelled, c.reason, c.message
+				return tektonStateCancelled, c.Reason, c.Message
 			}
-			return tektonStateFailed, c.reason, c.message
+			return tektonStateFailed, c.Reason, c.Message
 		default:
-			if c.reason == tektonPipelineRunPending || c.reason == "Pending" {
-				return tektonStatePending, c.reason, c.message
+			if c.Reason == tektonPipelineRunPending || c.Reason == "Pending" {
+				return tektonStatePending, c.Reason, c.Message
 			}
-			return tektonStateRunning, c.reason, c.message
+			return tektonStateRunning, c.Reason, c.Message
 		}
 	}
 	if specStatus, _, _ := unstructured.NestedString(obj.Object, "spec", "status"); specStatus == tektonPipelineRunPending {
@@ -287,11 +278,7 @@ func (m *ClientManager) TektonRunState(ctx context.Context, contextName, resourc
 	if resource != tektonPipelineRunsResource && resource != tektonTaskRunsResource {
 		return "", fmt.Errorf("unsupported tekton run resource: %q", resource)
 	}
-	gvr, ok := m.tektonGVR(contextName, resource)
-	if !ok {
-		return "", fmt.Errorf("%s.%s is not served by this cluster", resource, tektonGroup)
-	}
-	obj, err := m.crForDetail(ctx, contextName, gvr, namespace, name)
+	obj, err := m.getServedCR(ctx, contextName, tektonGR(resource), namespace, name)
 	if err != nil {
 		return "", err
 	}
@@ -318,22 +305,8 @@ func (m *ClientManager) CancelTektonTaskRun(ctx context.Context, contextName, na
 }
 
 func (m *ClientManager) patchTektonSpecStatus(ctx context.Context, contextName, resource, namespace, name, status string) error {
-	if err := m.assertWritable(contextName); err != nil {
-		return err
-	}
-	gvr, ok := m.tektonGVR(contextName, resource)
-	if !ok {
-		return fmt.Errorf("%s.%s is not served by this cluster", resource, tektonGroup)
-	}
-	dyn, err := m.dynamicClient(contextName)
-	if err != nil {
-		return err
-	}
-	body, err := json.Marshal(map[string]any{"spec": map[string]any{"status": status}})
-	if err != nil {
-		return err
-	}
-	if _, err := dyn.Resource(gvr).Namespace(namespace).Patch(ctx, name, types.MergePatchType, body, metav1.PatchOptions{}); err != nil {
+	patch := map[string]any{"spec": map[string]any{"status": status}}
+	if err := m.mergePatchCR(ctx, contextName, tektonGR(resource), namespace, name, patch); err != nil {
 		return fmt.Errorf("cancel %s %s/%s: %w", resource, namespace, name, err)
 	}
 	return nil
@@ -343,18 +316,10 @@ func (m *ClientManager) patchTektonSpecStatus(ctx context.Context, contextName, 
 // and returns the new run's name. It reads the source live, so the copy never
 // comes from the pruned informer cache.
 func (m *ClientManager) RerunTektonPipelineRun(ctx context.Context, contextName, namespace, name string) (string, error) {
-	if err := m.assertWritable(contextName); err != nil {
-		return "", err
-	}
-	gvr, ok := m.tektonGVR(contextName, tektonPipelineRunsResource)
-	if !ok {
-		return "", fmt.Errorf("%s.%s is not served by this cluster", tektonPipelineRunsResource, tektonGroup)
-	}
-	dyn, err := m.dynamicClient(contextName)
+	ri, err := m.writableResource(contextName, tektonGR(tektonPipelineRunsResource), namespace)
 	if err != nil {
 		return "", err
 	}
-	ri := dyn.Resource(gvr).Namespace(namespace)
 	src, err := ri.Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return "", fmt.Errorf("rerun pipelinerun %s/%s: %w", namespace, name, err)

@@ -7,10 +7,13 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 const karpenterAWSGroup = "karpenter.k8s.aws"
 const karpenterEC2NodeClassResource = "ec2nodeclasses"
+
+var karpenterEC2NodeClassGR = schema.GroupResource{Group: karpenterAWSGroup, Resource: karpenterEC2NodeClassResource}
 
 type KarpenterEC2NodeClassInfo struct {
 	Name               string `json:"name"`
@@ -51,40 +54,26 @@ type KarpenterEC2NodeClassDetail struct {
 }
 
 func (m *ClientManager) ListKarpenterEC2NodeClasses(contextName string) []KarpenterEC2NodeClassInfo {
-	gvr, ok := m.servedGVR(contextName, karpenterAWSGroup, karpenterEC2NodeClassResource)
-	if !ok {
-		return []KarpenterEC2NodeClassInfo{}
-	}
-	out := []KarpenterEC2NodeClassInfo{}
-	for _, obj := range listCachedCRs(m, contextName, gvr, "") {
-		out = append(out, extractKarpenterEC2NodeClass(obj))
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
+	return listServedRows(m, contextName, karpenterEC2NodeClassGR, "", extractKarpenterEC2NodeClass,
+		func(r KarpenterEC2NodeClassInfo) (string, string) { return "", r.Name })
 }
 
 func (m *ClientManager) GetKarpenterEC2NodeClass(ctx context.Context, contextName, name string) (*KarpenterEC2NodeClassDetail, error) {
-	gvr, ok := m.servedGVR(contextName, karpenterAWSGroup, karpenterEC2NodeClassResource)
-	if !ok {
-		return nil, fmt.Errorf("EC2NodeClass CRD not found")
-	}
-	obj, err := m.crForDetail(ctx, contextName, gvr, "", name)
+	obj, err := m.getServedCR(ctx, contextName, karpenterEC2NodeClassGR, "", name)
 	if err != nil {
 		return nil, err
 	}
 	profile, _, _ := unstructured.NestedString(obj.Object, "status", "instanceProfile")
 	return &KarpenterEC2NodeClassDetail{
 		KarpenterEC2NodeClassInfo: extractKarpenterEC2NodeClass(obj),
-		Conditions: extractConditions(obj, func(t, s, r, message, _ string) ConditionDetail {
-			return ConditionDetail{Type: t, Status: s, Reason: r, Message: message}
-		}),
-		Subnets:                 extractKarpenterResolvedResources(obj, "subnets"),
-		SecurityGroups:          extractKarpenterResolvedResources(obj, "securityGroups"),
-		AMIs:                    extractKarpenterResolvedResources(obj, "amis"),
-		SubnetSelectors:         extractKarpenterSelectors(obj, "subnetSelectorTerms"),
-		SecurityGroupSelectors:  extractKarpenterSelectors(obj, "securityGroupSelectorTerms"),
-		AMISelectors:            extractKarpenterSelectors(obj, "amiSelectorTerms"),
-		ResolvedInstanceProfile: profile,
+		Conditions:                crConditions(obj),
+		Subnets:                   extractKarpenterResolvedResources(obj, "subnets"),
+		SecurityGroups:            extractKarpenterResolvedResources(obj, "securityGroups"),
+		AMIs:                      extractKarpenterResolvedResources(obj, "amis"),
+		SubnetSelectors:           extractKarpenterSelectors(obj, "subnetSelectorTerms"),
+		SecurityGroupSelectors:    extractKarpenterSelectors(obj, "securityGroupSelectorTerms"),
+		AMISelectors:              extractKarpenterSelectors(obj, "amiSelectorTerms"),
+		ResolvedInstanceProfile:   profile,
 	}, nil
 }
 
@@ -92,7 +81,7 @@ func extractKarpenterEC2NodeClass(obj *unstructured.Unstructured) KarpenterEC2No
 	family := karpenterAMIFamily(obj)
 	role, _, _ := unstructured.NestedString(obj.Object, "spec", "role")
 	profile, _, _ := unstructured.NestedString(obj.Object, "spec", "instanceProfile")
-	ready, message := readySummary(extractFluxConditions(obj))
+	ready, message := readyCondition(crConditions(obj))
 	// An AMI can appear once per requirement set, so row count overstates image count.
 	amiIDs := map[string]struct{}{}
 	for _, ami := range extractKarpenterResolvedResources(obj, "amis") {

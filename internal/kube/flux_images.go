@@ -11,9 +11,9 @@ import (
 const fluxImageGroup = "image.toolkit.fluxcd.io"
 
 var (
-	fluxImageRepositoryGVR       = schema.GroupVersionResource{Group: fluxImageGroup, Version: "v1", Resource: "imagerepositories"}
-	fluxImagePolicyGVR           = schema.GroupVersionResource{Group: fluxImageGroup, Version: "v1", Resource: "imagepolicies"}
-	fluxImageUpdateAutomationGVR = schema.GroupVersionResource{Group: fluxImageGroup, Version: "v1", Resource: "imageupdateautomations"}
+	fluxImageRepositoryGR       = schema.GroupResource{Group: fluxImageGroup, Resource: "imagerepositories"}
+	fluxImagePolicyGR           = schema.GroupResource{Group: fluxImageGroup, Resource: "imagepolicies"}
+	fluxImageUpdateAutomationGR = schema.GroupResource{Group: fluxImageGroup, Resource: "imageupdateautomations"}
 )
 
 type FluxImageStatus struct {
@@ -36,14 +36,14 @@ type FluxImageRepositoryInfo struct {
 
 type FluxImageRepositoryDetail struct {
 	FluxImageRepositoryInfo
-	Conditions     []FluxCondition `json:"conditions"`
-	CanonicalImage string          `json:"canonicalImage"`
-	LatestTags     []string        `json:"latestTags"`
-	ExclusionList  []string        `json:"exclusionList"`
-	SecretRef      string          `json:"secretRef"`
-	CertSecretRef  string          `json:"certSecretRef"`
-	Insecure       bool            `json:"insecure"`
-	Timeout        string          `json:"timeout"`
+	Conditions     []ConditionDetail `json:"conditions"`
+	CanonicalImage string            `json:"canonicalImage"`
+	LatestTags     []string          `json:"latestTags"`
+	ExclusionList  []string          `json:"exclusionList"`
+	SecretRef      string            `json:"secretRef"`
+	CertSecretRef  string            `json:"certSecretRef"`
+	Insecure       bool              `json:"insecure"`
+	Timeout        string            `json:"timeout"`
 }
 
 type FluxImagePolicyInfo struct {
@@ -59,11 +59,11 @@ type FluxImagePolicyInfo struct {
 
 type FluxImagePolicyDetail struct {
 	FluxImagePolicyInfo
-	Conditions             []FluxCondition `json:"conditions"`
-	PreviousImage          string          `json:"previousImage"`
-	FilterPattern          string          `json:"filterPattern"`
-	FilterExtract          string          `json:"filterExtract"`
-	DigestReflectionPolicy string          `json:"digestReflectionPolicy"`
+	Conditions             []ConditionDetail `json:"conditions"`
+	PreviousImage          string            `json:"previousImage"`
+	FilterPattern          string            `json:"filterPattern"`
+	FilterExtract          string            `json:"filterExtract"`
+	DigestReflectionPolicy string            `json:"digestReflectionPolicy"`
 }
 
 type FluxImageUpdateAutomationInfo struct {
@@ -80,26 +80,18 @@ type FluxImageUpdateAutomationInfo struct {
 
 type FluxImageUpdateAutomationDetail struct {
 	FluxImageUpdateAutomationInfo
-	Conditions             []FluxCondition `json:"conditions"`
-	CheckoutBranch         string          `json:"checkoutBranch"`
-	UpdateStrategy         string          `json:"updateStrategy"`
-	ObservedSourceRevision string          `json:"observedSourceRevision"`
+	Conditions             []ConditionDetail `json:"conditions"`
+	CheckoutBranch         string            `json:"checkoutBranch"`
+	UpdateStrategy         string            `json:"updateStrategy"`
+	ObservedSourceRevision string            `json:"observedSourceRevision"`
 }
 
 func extractFluxImageStatus(obj *unstructured.Unstructured) FluxImageStatus {
-	ready, status := readySummary(extractFluxConditions(obj))
+	ready, status := readyCondition(crConditions(obj))
 	suspended, _, _ := unstructured.NestedBool(obj.Object, "spec", "suspend")
 	interval, _, _ := unstructured.NestedString(obj.Object, "spec", "interval")
 	return FluxImageStatus{Name: obj.GetName(), Namespace: obj.GetNamespace(),
 		Ready: ready, Status: status, Suspended: suspended, Interval: interval, CreatedAt: crCreatedAt(obj)}
-}
-
-func (m *ClientManager) getFluxImageResource(ctx context.Context, contextName string, gvr schema.GroupVersionResource, namespace, name string) (*unstructured.Unstructured, error) {
-	served, ok := m.servedGVR(contextName, gvr.Group, gvr.Resource)
-	if !ok {
-		return nil, fmt.Errorf("flux %s CRD not found", gvr.Resource)
-	}
-	return m.crForDetail(ctx, contextName, served, namespace, name)
 }
 
 func extractFluxImageRepository(obj *unstructured.Unstructured) FluxImageRepositoryInfo {
@@ -121,7 +113,7 @@ func extractFluxImageRepositoryDetail(obj *unstructured.Unstructured) *FluxImage
 	timeout, _, _ := unstructured.NestedString(obj.Object, "spec", "timeout")
 	insecure, _, _ := unstructured.NestedBool(obj.Object, "spec", "insecure")
 	return &FluxImageRepositoryDetail{FluxImageRepositoryInfo: extractFluxImageRepository(obj),
-		Conditions: extractFluxConditions(obj), CanonicalImage: canonical, LatestTags: append([]string{}, tags...),
+		Conditions: crConditions(obj), CanonicalImage: canonical, LatestTags: append([]string{}, tags...),
 		ExclusionList: append([]string{}, exclusions...), SecretRef: nestedRefName(obj, "spec", "secretRef"),
 		CertSecretRef: nestedRefName(obj, "spec", "certSecretRef"), Timeout: timeout, Insecure: insecure}
 }
@@ -177,7 +169,7 @@ func extractFluxImagePolicyDetail(obj *unstructured.Unstructured) *FluxImagePoli
 		reflection = "Never"
 	}
 	return &FluxImagePolicyDetail{FluxImagePolicyInfo: extractFluxImagePolicy(obj),
-		Conditions: extractFluxConditions(obj), PreviousImage: previous,
+		Conditions: crConditions(obj), PreviousImage: previous,
 		FilterPattern: pattern, FilterExtract: extract, DigestReflectionPolicy: reflection}
 }
 
@@ -219,31 +211,36 @@ func extractFluxImageUpdateAutomationDetail(obj *unstructured.Unstructured) *Flu
 	strategy, _, _ := unstructured.NestedString(obj.Object, "spec", "update", "strategy")
 	revision, _, _ := unstructured.NestedString(obj.Object, "status", "observedSourceRevision")
 	return &FluxImageUpdateAutomationDetail{FluxImageUpdateAutomationInfo: extractFluxImageUpdateAutomation(obj),
-		Conditions: extractFluxConditions(obj), CheckoutBranch: checkout, UpdateStrategy: strategy, ObservedSourceRevision: revision}
+		Conditions: crConditions(obj), CheckoutBranch: checkout, UpdateStrategy: strategy, ObservedSourceRevision: revision}
 }
 
+// fluxActionResource maps a Klustr-side Flux kind ("FluxKustomization") to
+// its resource.
+func fluxActionResource(kind string) (schema.GroupResource, error) {
+	gr, ok := fluxKindResource[kind]
+	if !ok {
+		return schema.GroupResource{}, fmt.Errorf("unsupported flux kind: %q", kind)
+	}
+	return gr, nil
+}
+
+// fluxActionGVR is fluxActionResource at the version the cluster serves, for
+// the generic YAML and delete paths.
 func (m *ClientManager) fluxActionGVR(contextName, kind string) (schema.GroupVersionResource, error) {
-	gvr, ok := fluxKindGVR[kind]
-	if !ok {
-		return schema.GroupVersionResource{}, fmt.Errorf("unsupported flux kind: %q", kind)
+	gr, err := fluxActionResource(kind)
+	if err != nil {
+		return schema.GroupVersionResource{}, err
 	}
-	if gvr.Group != fluxImageGroup {
-		return gvr, nil
-	}
-	served, ok := m.servedGVR(contextName, gvr.Group, gvr.Resource)
-	if !ok {
-		return schema.GroupVersionResource{}, fmt.Errorf("flux %s CRD not found", gvr.Resource)
-	}
-	return served, nil
+	return m.requireServedGVR(contextName, gr)
 }
 
 func (m *ClientManager) ListFluxImageRepositories(contextName, namespace string) []FluxImageRepositoryInfo {
-	return listFluxRows(m, contextName, fluxImageRepositoryGVR, namespace, extractFluxImageRepository,
+	return listServedRows(m, contextName, fluxImageRepositoryGR, namespace, extractFluxImageRepository,
 		func(r FluxImageRepositoryInfo) (string, string) { return r.Namespace, r.Name })
 }
 
 func (m *ClientManager) GetFluxImageRepository(ctx context.Context, contextName, namespace, name string) (*FluxImageRepositoryDetail, error) {
-	obj, err := m.getFluxImageResource(ctx, contextName, fluxImageRepositoryGVR, namespace, name)
+	obj, err := m.getServedCR(ctx, contextName, fluxImageRepositoryGR, namespace, name)
 	if err != nil {
 		return nil, err
 	}
@@ -251,12 +248,12 @@ func (m *ClientManager) GetFluxImageRepository(ctx context.Context, contextName,
 }
 
 func (m *ClientManager) ListFluxImagePolicies(contextName, namespace string) []FluxImagePolicyInfo {
-	return listFluxRows(m, contextName, fluxImagePolicyGVR, namespace, extractFluxImagePolicy,
+	return listServedRows(m, contextName, fluxImagePolicyGR, namespace, extractFluxImagePolicy,
 		func(r FluxImagePolicyInfo) (string, string) { return r.Namespace, r.Name })
 }
 
 func (m *ClientManager) GetFluxImagePolicy(ctx context.Context, contextName, namespace, name string) (*FluxImagePolicyDetail, error) {
-	obj, err := m.getFluxImageResource(ctx, contextName, fluxImagePolicyGVR, namespace, name)
+	obj, err := m.getServedCR(ctx, contextName, fluxImagePolicyGR, namespace, name)
 	if err != nil {
 		return nil, err
 	}
@@ -264,12 +261,12 @@ func (m *ClientManager) GetFluxImagePolicy(ctx context.Context, contextName, nam
 }
 
 func (m *ClientManager) ListFluxImageUpdateAutomations(contextName, namespace string) []FluxImageUpdateAutomationInfo {
-	return listFluxRows(m, contextName, fluxImageUpdateAutomationGVR, namespace, extractFluxImageUpdateAutomation,
+	return listServedRows(m, contextName, fluxImageUpdateAutomationGR, namespace, extractFluxImageUpdateAutomation,
 		func(r FluxImageUpdateAutomationInfo) (string, string) { return r.Namespace, r.Name })
 }
 
 func (m *ClientManager) GetFluxImageUpdateAutomation(ctx context.Context, contextName, namespace, name string) (*FluxImageUpdateAutomationDetail, error) {
-	obj, err := m.getFluxImageResource(ctx, contextName, fluxImageUpdateAutomationGVR, namespace, name)
+	obj, err := m.getServedCR(ctx, contextName, fluxImageUpdateAutomationGR, namespace, name)
 	if err != nil {
 		return nil, err
 	}

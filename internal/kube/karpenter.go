@@ -1,27 +1,17 @@
 package kube
 
 import (
-	"sort"
-	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// karpenter.sh has been the stable group since Karpenter 1.0; the storage
-// version is v1. NodePool and NodeClaim are both cluster-scoped.
+// NodePool and NodeClaim are both cluster-scoped. Their storage version is v1
+// since Karpenter 1.0 and v1beta1 before it.
 var (
-	karpenterNodePoolGVR = schema.GroupVersionResource{
-		Group:    "karpenter.sh",
-		Version:  "v1",
-		Resource: "nodepools",
-	}
-	karpenterNodeClaimGVR = schema.GroupVersionResource{
-		Group:    "karpenter.sh",
-		Version:  "v1",
-		Resource: "nodeclaims",
-	}
+	karpenterNodePoolGR  = schema.GroupResource{Group: "karpenter.sh", Resource: "nodepools"}
+	karpenterNodeClaimGR = schema.GroupResource{Group: "karpenter.sh", Resource: "nodeclaims"}
 )
 
 // KarpenterNodePoolInfo is the row shape for the NodePools list view.
@@ -72,24 +62,14 @@ type KarpenterNodeClaimInfo struct {
 // Caller must have started the CR watch first (frontend does this on view mount,
 // same as Argo Applications).
 func (m *ClientManager) ListKarpenterNodePools(contextName string) []KarpenterNodePoolInfo {
-	objs := m.listKarpenterCR(contextName, karpenterNodePoolGVR)
-	out := make([]KarpenterNodePoolInfo, 0, len(objs))
-	for _, obj := range objs {
-		out = append(out, extractKarpenterNodePool(obj))
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
+	return listServedRows(m, contextName, karpenterNodePoolGR, "", extractKarpenterNodePool,
+		func(r KarpenterNodePoolInfo) (string, string) { return "", r.Name })
 }
 
 // ListKarpenterNodeClaims projects cached NodeClaim CRs into KarpenterNodeClaimInfo.
 func (m *ClientManager) ListKarpenterNodeClaims(contextName string) []KarpenterNodeClaimInfo {
-	objs := m.listKarpenterCR(contextName, karpenterNodeClaimGVR)
-	out := make([]KarpenterNodeClaimInfo, 0, len(objs))
-	for _, obj := range objs {
-		out = append(out, extractKarpenterNodeClaim(obj))
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
+	return listServedRows(m, contextName, karpenterNodeClaimGR, "", extractKarpenterNodeClaim,
+		func(r KarpenterNodeClaimInfo) (string, string) { return "", r.Name })
 }
 
 // NodeForNodeClaim resolves the single node a NodeClaim has registered, read from
@@ -102,7 +82,7 @@ func (m *ClientManager) NodeForNodeClaim(contextName, nodeClaimName string) []No
 		return []NodeInfo{}
 	}
 	var nodeName string
-	for _, obj := range m.listKarpenterCR(contextName, karpenterNodeClaimGVR) {
+	for _, obj := range m.listServedCRs(contextName, karpenterNodeClaimGR, "") {
 		if obj.GetName() == nodeClaimName {
 			nodeName, _, _ = unstructured.NestedString(obj.Object, "status", "nodeName")
 			break
@@ -112,14 +92,6 @@ func (m *ClientManager) NodeForNodeClaim(contextName, nodeClaimName string) []No
 		return []NodeInfo{}
 	}
 	return w.NodeInfoByName(nodeName)
-}
-
-// listKarpenterCR is the shared cache lookup the typed Karpenter listers use.
-// It returns an empty slice when the CR watch hasn't been started yet — the
-// frontend retries after EnsureCustomResourceWatch resolves, mirroring the
-// Argo Applications flow in argocd.go.
-func (m *ClientManager) listKarpenterCR(contextName string, gvr schema.GroupVersionResource) []*unstructured.Unstructured {
-	return listCachedCRs(m, contextName, gvr, "")
 }
 
 func extractKarpenterNodePool(obj *unstructured.Unstructured) KarpenterNodePoolInfo {
@@ -155,7 +127,7 @@ func extractKarpenterNodePool(obj *unstructured.Unstructured) KarpenterNodePoolI
 			info.NodeCount = nodes
 		}
 	}
-	info.Ready = unstructuredConditionStatus(obj, "Ready")
+	info.Ready = conditionStatusByType(crConditions(obj), "Ready")
 	return info
 }
 
@@ -189,34 +161,11 @@ func extractKarpenterNodeClaim(obj *unstructured.Unstructured) KarpenterNodeClai
 	info.CapacityType = lbls["karpenter.sh/capacity-type"]
 	info.Zone = lbls["topology.kubernetes.io/zone"]
 
-	info.Launched = unstructuredConditionStatus(obj, "Launched")
-	info.Registered = unstructuredConditionStatus(obj, "Registered")
-	info.Initialized = unstructuredConditionStatus(obj, "Initialized")
-	info.Drifted = unstructuredConditionStatus(obj, "Drifted")
-	info.Ready = unstructuredConditionStatus(obj, "Ready")
+	conds := crConditions(obj)
+	info.Launched = conditionStatusByType(conds, "Launched")
+	info.Registered = conditionStatusByType(conds, "Registered")
+	info.Initialized = conditionStatusByType(conds, "Initialized")
+	info.Drifted = conditionStatusByType(conds, "Drifted")
+	info.Ready = conditionStatusByType(conds, "Ready")
 	return info
-}
-
-// unstructuredConditionStatus walks status.conditions[] on an unstructured
-// CR and returns the matched condition's status ("True" / "False" /
-// "Unknown") or empty string if absent. Lives next to the Karpenter
-// extractors because every Karpenter CR uses this shape.
-func unstructuredConditionStatus(obj *unstructured.Unstructured, conditionType string) string {
-	conditions, found, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
-	if !found {
-		return ""
-	}
-	for _, c := range conditions {
-		m, ok := c.(map[string]any)
-		if !ok {
-			continue
-		}
-		t, _ := m["type"].(string)
-		if !strings.EqualFold(t, conditionType) {
-			continue
-		}
-		s, _ := m["status"].(string)
-		return s
-	}
-	return ""
 }

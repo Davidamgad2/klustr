@@ -2,52 +2,46 @@ package kube
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 )
 
-// Flux CD CR GVRs as of Flux v2.8.x. Kustomization and GitRepository have
-// settled on v1; HelmRelease moved to v2 in Flux 2.3 (v2beta2 is still
-// served on older installs but every release Klustr targets exposes v2).
+// Flux CD CR resources. Versions differ across Flux releases (HelmRelease
+// was v2beta* before Flux 2.3, Provider and Alert are still v1beta3 while
+// Receiver is v1), so each is read at the version the cluster serves.
 var (
-	fluxKustomizationGVR  = schema.GroupVersionResource{Group: "kustomize.toolkit.fluxcd.io", Version: "v1", Resource: "kustomizations"}
-	fluxHelmReleaseGVR    = schema.GroupVersionResource{Group: "helm.toolkit.fluxcd.io", Version: "v2", Resource: "helmreleases"}
-	fluxGitRepositoryGVR  = schema.GroupVersionResource{Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "gitrepositories"}
-	fluxHelmRepositoryGVR = schema.GroupVersionResource{Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "helmrepositories"}
-	fluxOCIRepositoryGVR  = schema.GroupVersionResource{Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "ocirepositories"}
-	fluxBucketGVR         = schema.GroupVersionResource{Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "buckets"}
-	// Notification toolkit hasn't graduated Provider and Alert to v1 yet —
-	// Receiver did. The storage version on the cluster is what we serve, so
-	// pin each to the right one rather than guessing a single shared version.
-	fluxProviderGVR = schema.GroupVersionResource{Group: "notification.toolkit.fluxcd.io", Version: "v1beta3", Resource: "providers"}
-	fluxAlertGVR    = schema.GroupVersionResource{Group: "notification.toolkit.fluxcd.io", Version: "v1beta3", Resource: "alerts"}
-	fluxReceiverGVR = schema.GroupVersionResource{Group: "notification.toolkit.fluxcd.io", Version: "v1", Resource: "receivers"}
+	fluxKustomizationGR  = schema.GroupResource{Group: "kustomize.toolkit.fluxcd.io", Resource: "kustomizations"}
+	fluxHelmReleaseGR    = schema.GroupResource{Group: "helm.toolkit.fluxcd.io", Resource: "helmreleases"}
+	fluxGitRepositoryGR  = schema.GroupResource{Group: "source.toolkit.fluxcd.io", Resource: "gitrepositories"}
+	fluxHelmRepositoryGR = schema.GroupResource{Group: "source.toolkit.fluxcd.io", Resource: "helmrepositories"}
+	fluxOCIRepositoryGR  = schema.GroupResource{Group: "source.toolkit.fluxcd.io", Resource: "ocirepositories"}
+	fluxBucketGR         = schema.GroupResource{Group: "source.toolkit.fluxcd.io", Resource: "buckets"}
+	fluxProviderGR       = schema.GroupResource{Group: "notification.toolkit.fluxcd.io", Resource: "providers"}
+	fluxAlertGR          = schema.GroupResource{Group: "notification.toolkit.fluxcd.io", Resource: "alerts"}
+	fluxReceiverGR       = schema.GroupResource{Group: "notification.toolkit.fluxcd.io", Resource: "receivers"}
 )
 
-// fluxKindGVR maps the Klustr-side Flux kind identifiers (used by the
-// frontend / Wails layer) to their canonical GVR. The "Flux" prefix keeps
+// fluxKindResource maps the Klustr-side Flux kind identifiers (used by the
+// frontend / Wails layer) to their resource. The "Flux" prefix keeps
 // the kind names from colliding with the helm v3 HelmRelease detail tab in
 // ResourceDetailPanel and disambiguates dispatch in the UI without a
 // special-case for every site.
-var fluxKindGVR = map[string]schema.GroupVersionResource{
-	"FluxImageRepository":       fluxImageRepositoryGVR,
-	"FluxImagePolicy":           fluxImagePolicyGVR,
-	"FluxImageUpdateAutomation": fluxImageUpdateAutomationGVR,
-	"FluxKustomization":         fluxKustomizationGVR,
-	"FluxHelmRelease":           fluxHelmReleaseGVR,
-	"FluxGitRepository":         fluxGitRepositoryGVR,
-	"FluxHelmRepository":        fluxHelmRepositoryGVR,
-	"FluxOCIRepository":         fluxOCIRepositoryGVR,
-	"FluxBucket":                fluxBucketGVR,
-	"FluxProvider":              fluxProviderGVR,
-	"FluxAlert":                 fluxAlertGVR,
-	"FluxReceiver":              fluxReceiverGVR,
+var fluxKindResource = map[string]schema.GroupResource{
+	"FluxImageRepository":       fluxImageRepositoryGR,
+	"FluxImagePolicy":           fluxImagePolicyGR,
+	"FluxImageUpdateAutomation": fluxImageUpdateAutomationGR,
+	"FluxKustomization":         fluxKustomizationGR,
+	"FluxHelmRelease":           fluxHelmReleaseGR,
+	"FluxGitRepository":         fluxGitRepositoryGR,
+	"FluxHelmRepository":        fluxHelmRepositoryGR,
+	"FluxOCIRepository":         fluxOCIRepositoryGR,
+	"FluxBucket":                fluxBucketGR,
+	"FluxProvider":              fluxProviderGR,
+	"FluxAlert":                 fluxAlertGR,
+	"FluxReceiver":              fluxReceiverGR,
 }
 
 // fluxReconcileAnnotation is the trigger Flux controllers watch for to
@@ -56,18 +50,6 @@ var fluxKindGVR = map[string]schema.GroupVersionResource{
 // status.lastHandledReconcileAt or the controller treats it as already
 // handled and ignores the change.
 const fluxReconcileAnnotation = "reconcile.fluxcd.io/requestedAt"
-
-// FluxCondition is the projection of one entry in .status.conditions that
-// every Flux CR exposes (k8s metav1.Condition shape). Reading the Ready
-// condition gives the user-facing health summary; the other conditions
-// (Stalled, Reconciling) provide context the detail panel surfaces.
-type FluxCondition struct {
-	Type               string `json:"type"`
-	Status             string `json:"status"`
-	Reason             string `json:"reason"`
-	Message            string `json:"message"`
-	LastTransitionTime string `json:"lastTransitionTime"`
-}
 
 // ---------------------------------------------------------------------------
 // Kustomization
@@ -94,24 +76,24 @@ type FluxKustomizationInfo struct {
 // detail panel renders alongside the conditions table.
 type FluxKustomizationDetail struct {
 	FluxKustomizationInfo
-	Conditions         []FluxCondition `json:"conditions"`
-	Prune              bool            `json:"prune"`
-	Force              bool            `json:"force"`
-	Wait               bool            `json:"wait"`
-	TargetNamespace    string          `json:"targetNamespace"`
-	ServiceAccountName string          `json:"serviceAccountName"`
-	Timeout            string          `json:"timeout"`
-	RetryInterval      string          `json:"retryInterval"`
-	DependsOn          []string        `json:"dependsOn"`
+	Conditions         []ConditionDetail `json:"conditions"`
+	Prune              bool              `json:"prune"`
+	Force              bool              `json:"force"`
+	Wait               bool              `json:"wait"`
+	TargetNamespace    string            `json:"targetNamespace"`
+	ServiceAccountName string            `json:"serviceAccountName"`
+	Timeout            string            `json:"timeout"`
+	RetryInterval      string            `json:"retryInterval"`
+	DependsOn          []string          `json:"dependsOn"`
 }
 
 func (m *ClientManager) ListFluxKustomizations(contextName, namespace string) []FluxKustomizationInfo {
-	return listFluxRows(m, contextName, fluxKustomizationGVR, namespace, extractFluxKustomization,
+	return listServedRows(m, contextName, fluxKustomizationGR, namespace, extractFluxKustomization,
 		func(r FluxKustomizationInfo) (string, string) { return r.Namespace, r.Name })
 }
 
 func (m *ClientManager) GetFluxKustomization(ctx context.Context, contextName, namespace, name string) (*FluxKustomizationDetail, error) {
-	obj, err := m.crForDetail(ctx, contextName, fluxKustomizationGVR, namespace, name)
+	obj, err := m.getServedCR(ctx, contextName, fluxKustomizationGR, namespace, name)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +108,7 @@ func (m *ClientManager) GetFluxKustomization(ctx context.Context, contextName, n
 	retry, _, _ := unstructured.NestedString(obj.Object, "spec", "retryInterval")
 	return &FluxKustomizationDetail{
 		FluxKustomizationInfo: info,
-		Conditions:            extractFluxConditions(obj),
+		Conditions:            crConditions(obj),
 		Prune:                 prune,
 		Force:                 force,
 		Wait:                  wait,
@@ -139,8 +121,8 @@ func (m *ClientManager) GetFluxKustomization(ctx context.Context, contextName, n
 }
 
 func extractFluxKustomization(obj *unstructured.Unstructured) FluxKustomizationInfo {
-	conds := extractFluxConditions(obj)
-	readyStatus, readyMsg := readySummary(conds)
+	conds := crConditions(obj)
+	readyStatus, readyMsg := readyCondition(conds)
 	suspended, _, _ := unstructured.NestedBool(obj.Object, "spec", "suspend")
 	path, _, _ := unstructured.NestedString(obj.Object, "spec", "path")
 	interval, _, _ := unstructured.NestedString(obj.Object, "spec", "interval")
@@ -185,22 +167,22 @@ type FluxHelmReleaseInfo struct {
 
 type FluxHelmReleaseDetail struct {
 	FluxHelmReleaseInfo
-	Conditions       []FluxCondition `json:"conditions"`
-	ReleaseName      string          `json:"releaseName"`
-	TargetNamespace  string          `json:"targetNamespace"`
-	StorageNamespace string          `json:"storageNamespace"`
-	ServiceAccount   string          `json:"serviceAccount"`
-	Timeout          string          `json:"timeout"`
-	DependsOn        []string        `json:"dependsOn"`
+	Conditions       []ConditionDetail `json:"conditions"`
+	ReleaseName      string            `json:"releaseName"`
+	TargetNamespace  string            `json:"targetNamespace"`
+	StorageNamespace string            `json:"storageNamespace"`
+	ServiceAccount   string            `json:"serviceAccount"`
+	Timeout          string            `json:"timeout"`
+	DependsOn        []string          `json:"dependsOn"`
 }
 
 func (m *ClientManager) ListFluxHelmReleases(contextName, namespace string) []FluxHelmReleaseInfo {
-	return listFluxRows(m, contextName, fluxHelmReleaseGVR, namespace, extractFluxHelmRelease,
+	return listServedRows(m, contextName, fluxHelmReleaseGR, namespace, extractFluxHelmRelease,
 		func(r FluxHelmReleaseInfo) (string, string) { return r.Namespace, r.Name })
 }
 
 func (m *ClientManager) GetFluxHelmRelease(ctx context.Context, contextName, namespace, name string) (*FluxHelmReleaseDetail, error) {
-	obj, err := m.crForDetail(ctx, contextName, fluxHelmReleaseGVR, namespace, name)
+	obj, err := m.getServedCR(ctx, contextName, fluxHelmReleaseGR, namespace, name)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +195,7 @@ func (m *ClientManager) GetFluxHelmRelease(ctx context.Context, contextName, nam
 	dependsOn, _, _ := nestedSliceNoCopy(obj.Object, "spec", "dependsOn")
 	return &FluxHelmReleaseDetail{
 		FluxHelmReleaseInfo: info,
-		Conditions:          extractFluxConditions(obj),
+		Conditions:          crConditions(obj),
 		ReleaseName:         releaseName,
 		TargetNamespace:     targetNS,
 		StorageNamespace:    storageNS,
@@ -224,8 +206,8 @@ func (m *ClientManager) GetFluxHelmRelease(ctx context.Context, contextName, nam
 }
 
 func extractFluxHelmRelease(obj *unstructured.Unstructured) FluxHelmReleaseInfo {
-	conds := extractFluxConditions(obj)
-	readyStatus, readyMsg := readySummary(conds)
+	conds := crConditions(obj)
+	readyStatus, readyMsg := readyCondition(conds)
 	suspended, _, _ := unstructured.NestedBool(obj.Object, "spec", "suspend")
 	interval, _, _ := unstructured.NestedString(obj.Object, "spec", "interval")
 	appliedRev, _, _ := unstructured.NestedString(obj.Object, "status", "lastAppliedRevision")
@@ -299,20 +281,20 @@ type FluxGitRepositoryInfo struct {
 
 type FluxGitRepositoryDetail struct {
 	FluxGitRepositoryInfo
-	Conditions     []FluxCondition `json:"conditions"`
-	SecretRef      string          `json:"secretRef"`
-	Timeout        string          `json:"timeout"`
-	IgnorePatterns string          `json:"ignorePatterns"`
-	Verification   string          `json:"verification"`
+	Conditions     []ConditionDetail `json:"conditions"`
+	SecretRef      string            `json:"secretRef"`
+	Timeout        string            `json:"timeout"`
+	IgnorePatterns string            `json:"ignorePatterns"`
+	Verification   string            `json:"verification"`
 }
 
 func (m *ClientManager) ListFluxGitRepositories(contextName, namespace string) []FluxGitRepositoryInfo {
-	return listFluxRows(m, contextName, fluxGitRepositoryGVR, namespace, extractFluxGitRepository,
+	return listServedRows(m, contextName, fluxGitRepositoryGR, namespace, extractFluxGitRepository,
 		func(r FluxGitRepositoryInfo) (string, string) { return r.Namespace, r.Name })
 }
 
 func (m *ClientManager) GetFluxGitRepository(ctx context.Context, contextName, namespace, name string) (*FluxGitRepositoryDetail, error) {
-	obj, err := m.crForDetail(ctx, contextName, fluxGitRepositoryGVR, namespace, name)
+	obj, err := m.getServedCR(ctx, contextName, fluxGitRepositoryGR, namespace, name)
 	if err != nil {
 		return nil, err
 	}
@@ -323,7 +305,7 @@ func (m *ClientManager) GetFluxGitRepository(ctx context.Context, contextName, n
 	secretRef := nestedRefName(obj, "spec", "secretRef")
 	return &FluxGitRepositoryDetail{
 		FluxGitRepositoryInfo: info,
-		Conditions:            extractFluxConditions(obj),
+		Conditions:            crConditions(obj),
 		SecretRef:             secretRef,
 		Timeout:               timeout,
 		IgnorePatterns:        ignore,
@@ -332,8 +314,8 @@ func (m *ClientManager) GetFluxGitRepository(ctx context.Context, contextName, n
 }
 
 func extractFluxGitRepository(obj *unstructured.Unstructured) FluxGitRepositoryInfo {
-	conds := extractFluxConditions(obj)
-	readyStatus, readyMsg := readySummary(conds)
+	conds := crConditions(obj)
+	readyStatus, readyMsg := readyCondition(conds)
 	suspended, _, _ := unstructured.NestedBool(obj.Object, "spec", "suspend")
 	url, _, _ := unstructured.NestedString(obj.Object, "spec", "url")
 	interval, _, _ := unstructured.NestedString(obj.Object, "spec", "interval")
@@ -402,19 +384,19 @@ type FluxHelmRepositoryInfo struct {
 
 type FluxHelmRepositoryDetail struct {
 	FluxHelmRepositoryInfo
-	Conditions []FluxCondition `json:"conditions"`
-	SecretRef  string          `json:"secretRef"`
-	Timeout    string          `json:"timeout"`
-	PassCreds  bool            `json:"passCredentials"`
+	Conditions []ConditionDetail `json:"conditions"`
+	SecretRef  string            `json:"secretRef"`
+	Timeout    string            `json:"timeout"`
+	PassCreds  bool              `json:"passCredentials"`
 }
 
 func (m *ClientManager) ListFluxHelmRepositories(contextName, namespace string) []FluxHelmRepositoryInfo {
-	return listFluxRows(m, contextName, fluxHelmRepositoryGVR, namespace, extractFluxHelmRepository,
+	return listServedRows(m, contextName, fluxHelmRepositoryGR, namespace, extractFluxHelmRepository,
 		func(r FluxHelmRepositoryInfo) (string, string) { return r.Namespace, r.Name })
 }
 
 func (m *ClientManager) GetFluxHelmRepository(ctx context.Context, contextName, namespace, name string) (*FluxHelmRepositoryDetail, error) {
-	obj, err := m.crForDetail(ctx, contextName, fluxHelmRepositoryGVR, namespace, name)
+	obj, err := m.getServedCR(ctx, contextName, fluxHelmRepositoryGR, namespace, name)
 	if err != nil {
 		return nil, err
 	}
@@ -424,7 +406,7 @@ func (m *ClientManager) GetFluxHelmRepository(ctx context.Context, contextName, 
 	secretRef := nestedRefName(obj, "spec", "secretRef")
 	return &FluxHelmRepositoryDetail{
 		FluxHelmRepositoryInfo: info,
-		Conditions:             extractFluxConditions(obj),
+		Conditions:             crConditions(obj),
 		SecretRef:              secretRef,
 		Timeout:                timeout,
 		PassCreds:              passCreds,
@@ -432,8 +414,8 @@ func (m *ClientManager) GetFluxHelmRepository(ctx context.Context, contextName, 
 }
 
 func extractFluxHelmRepository(obj *unstructured.Unstructured) FluxHelmRepositoryInfo {
-	conds := extractFluxConditions(obj)
-	readyStatus, readyMsg := readySummary(conds)
+	conds := crConditions(obj)
+	readyStatus, readyMsg := readyCondition(conds)
 	suspended, _, _ := unstructured.NestedBool(obj.Object, "spec", "suspend")
 	url, _, _ := unstructured.NestedString(obj.Object, "spec", "url")
 	repoType, _, _ := unstructured.NestedString(obj.Object, "spec", "type")
@@ -485,22 +467,22 @@ type FluxOCIRepositoryInfo struct {
 
 type FluxOCIRepositoryDetail struct {
 	FluxOCIRepositoryInfo
-	Conditions  []FluxCondition `json:"conditions"`
-	SecretRef   string          `json:"secretRef"`
-	ServiceAcct string          `json:"serviceAccountName"`
-	CertSecret  string          `json:"certSecretRef"`
-	Timeout     string          `json:"timeout"`
-	Verify      string          `json:"verify"`
-	Insecure    bool            `json:"insecure"`
+	Conditions  []ConditionDetail `json:"conditions"`
+	SecretRef   string            `json:"secretRef"`
+	ServiceAcct string            `json:"serviceAccountName"`
+	CertSecret  string            `json:"certSecretRef"`
+	Timeout     string            `json:"timeout"`
+	Verify      string            `json:"verify"`
+	Insecure    bool              `json:"insecure"`
 }
 
 func (m *ClientManager) ListFluxOCIRepositories(contextName, namespace string) []FluxOCIRepositoryInfo {
-	return listFluxRows(m, contextName, fluxOCIRepositoryGVR, namespace, extractFluxOCIRepository,
+	return listServedRows(m, contextName, fluxOCIRepositoryGR, namespace, extractFluxOCIRepository,
 		func(r FluxOCIRepositoryInfo) (string, string) { return r.Namespace, r.Name })
 }
 
 func (m *ClientManager) GetFluxOCIRepository(ctx context.Context, contextName, namespace, name string) (*FluxOCIRepositoryDetail, error) {
-	obj, err := m.crForDetail(ctx, contextName, fluxOCIRepositoryGVR, namespace, name)
+	obj, err := m.getServedCR(ctx, contextName, fluxOCIRepositoryGR, namespace, name)
 	if err != nil {
 		return nil, err
 	}
@@ -513,7 +495,7 @@ func (m *ClientManager) GetFluxOCIRepository(ctx context.Context, contextName, n
 	verifyMode, _, _ := unstructured.NestedString(obj.Object, "spec", "verify", "provider")
 	return &FluxOCIRepositoryDetail{
 		FluxOCIRepositoryInfo: info,
-		Conditions:            extractFluxConditions(obj),
+		Conditions:            crConditions(obj),
 		SecretRef:             secretRef,
 		ServiceAcct:           sa,
 		CertSecret:            certSecret,
@@ -524,8 +506,8 @@ func (m *ClientManager) GetFluxOCIRepository(ctx context.Context, contextName, n
 }
 
 func extractFluxOCIRepository(obj *unstructured.Unstructured) FluxOCIRepositoryInfo {
-	conds := extractFluxConditions(obj)
-	readyStatus, readyMsg := readySummary(conds)
+	conds := crConditions(obj)
+	readyStatus, readyMsg := readyCondition(conds)
 	suspended, _, _ := unstructured.NestedBool(obj.Object, "spec", "suspend")
 	url, _, _ := unstructured.NestedString(obj.Object, "spec", "url")
 	provider, _, _ := unstructured.NestedString(obj.Object, "spec", "provider")
@@ -590,20 +572,20 @@ type FluxBucketInfo struct {
 
 type FluxBucketDetail struct {
 	FluxBucketInfo
-	Conditions []FluxCondition `json:"conditions"`
-	SecretRef  string          `json:"secretRef"`
-	Timeout    string          `json:"timeout"`
-	Insecure   bool            `json:"insecure"`
-	Prefix     string          `json:"prefix"`
+	Conditions []ConditionDetail `json:"conditions"`
+	SecretRef  string            `json:"secretRef"`
+	Timeout    string            `json:"timeout"`
+	Insecure   bool              `json:"insecure"`
+	Prefix     string            `json:"prefix"`
 }
 
 func (m *ClientManager) ListFluxBuckets(contextName, namespace string) []FluxBucketInfo {
-	return listFluxRows(m, contextName, fluxBucketGVR, namespace, extractFluxBucket,
+	return listServedRows(m, contextName, fluxBucketGR, namespace, extractFluxBucket,
 		func(r FluxBucketInfo) (string, string) { return r.Namespace, r.Name })
 }
 
 func (m *ClientManager) GetFluxBucket(ctx context.Context, contextName, namespace, name string) (*FluxBucketDetail, error) {
-	obj, err := m.crForDetail(ctx, contextName, fluxBucketGVR, namespace, name)
+	obj, err := m.getServedCR(ctx, contextName, fluxBucketGR, namespace, name)
 	if err != nil {
 		return nil, err
 	}
@@ -614,7 +596,7 @@ func (m *ClientManager) GetFluxBucket(ctx context.Context, contextName, namespac
 	secretRef := nestedRefName(obj, "spec", "secretRef")
 	return &FluxBucketDetail{
 		FluxBucketInfo: info,
-		Conditions:     extractFluxConditions(obj),
+		Conditions:     crConditions(obj),
 		SecretRef:      secretRef,
 		Timeout:        timeout,
 		Insecure:       insecure,
@@ -623,8 +605,8 @@ func (m *ClientManager) GetFluxBucket(ctx context.Context, contextName, namespac
 }
 
 func extractFluxBucket(obj *unstructured.Unstructured) FluxBucketInfo {
-	conds := extractFluxConditions(obj)
-	readyStatus, readyMsg := readySummary(conds)
+	conds := crConditions(obj)
+	readyStatus, readyMsg := readyCondition(conds)
 	suspended, _, _ := unstructured.NestedBool(obj.Object, "spec", "suspend")
 	provider, _, _ := unstructured.NestedString(obj.Object, "spec", "provider")
 	bucket, _, _ := unstructured.NestedString(obj.Object, "spec", "bucketName")
@@ -675,20 +657,20 @@ type FluxProviderInfo struct {
 
 type FluxProviderDetail struct {
 	FluxProviderInfo
-	Conditions []FluxCondition `json:"conditions"`
-	SecretRef  string          `json:"secretRef"`
-	CertSecret string          `json:"certSecretRef"`
-	Proxy      string          `json:"proxy"`
-	Timeout    string          `json:"timeout"`
+	Conditions []ConditionDetail `json:"conditions"`
+	SecretRef  string            `json:"secretRef"`
+	CertSecret string            `json:"certSecretRef"`
+	Proxy      string            `json:"proxy"`
+	Timeout    string            `json:"timeout"`
 }
 
 func (m *ClientManager) ListFluxProviders(contextName, namespace string) []FluxProviderInfo {
-	return listFluxRows(m, contextName, fluxProviderGVR, namespace, extractFluxProvider,
+	return listServedRows(m, contextName, fluxProviderGR, namespace, extractFluxProvider,
 		func(r FluxProviderInfo) (string, string) { return r.Namespace, r.Name })
 }
 
 func (m *ClientManager) GetFluxProvider(ctx context.Context, contextName, namespace, name string) (*FluxProviderDetail, error) {
-	obj, err := m.crForDetail(ctx, contextName, fluxProviderGVR, namespace, name)
+	obj, err := m.getServedCR(ctx, contextName, fluxProviderGR, namespace, name)
 	if err != nil {
 		return nil, err
 	}
@@ -699,7 +681,7 @@ func (m *ClientManager) GetFluxProvider(ctx context.Context, contextName, namesp
 	certSecret := nestedRefName(obj, "spec", "certSecretRef")
 	return &FluxProviderDetail{
 		FluxProviderInfo: info,
-		Conditions:       extractFluxConditions(obj),
+		Conditions:       crConditions(obj),
 		SecretRef:        secretRef,
 		CertSecret:       certSecret,
 		Proxy:            proxy,
@@ -708,8 +690,8 @@ func (m *ClientManager) GetFluxProvider(ctx context.Context, contextName, namesp
 }
 
 func extractFluxProvider(obj *unstructured.Unstructured) FluxProviderInfo {
-	conds := extractFluxConditions(obj)
-	readyStatus, readyMsg := readySummary(conds)
+	conds := crConditions(obj)
+	readyStatus, readyMsg := readyCondition(conds)
 	suspended, _, _ := unstructured.NestedBool(obj.Object, "spec", "suspend")
 	provType, _, _ := unstructured.NestedString(obj.Object, "spec", "type")
 	channel, _, _ := unstructured.NestedString(obj.Object, "spec", "channel")
@@ -771,7 +753,7 @@ type FluxAlertSource struct {
 
 type FluxAlertDetail struct {
 	FluxAlertInfo
-	Conditions    []FluxCondition   `json:"conditions"`
+	Conditions    []ConditionDetail `json:"conditions"`
 	EventSources  []FluxAlertSource `json:"eventSources"`
 	InclusionList []string          `json:"inclusionList"`
 	ExclusionList []string          `json:"exclusionList"`
@@ -779,12 +761,12 @@ type FluxAlertDetail struct {
 }
 
 func (m *ClientManager) ListFluxAlerts(contextName, namespace string) []FluxAlertInfo {
-	return listFluxRows(m, contextName, fluxAlertGVR, namespace, extractFluxAlert,
+	return listServedRows(m, contextName, fluxAlertGR, namespace, extractFluxAlert,
 		func(r FluxAlertInfo) (string, string) { return r.Namespace, r.Name })
 }
 
 func (m *ClientManager) GetFluxAlert(ctx context.Context, contextName, namespace, name string) (*FluxAlertDetail, error) {
-	obj, err := m.crForDetail(ctx, contextName, fluxAlertGVR, namespace, name)
+	obj, err := m.getServedCR(ctx, contextName, fluxAlertGR, namespace, name)
 	if err != nil {
 		return nil, err
 	}
@@ -797,7 +779,7 @@ func (m *ClientManager) GetFluxAlert(ctx context.Context, contextName, namespace
 	}
 	return &FluxAlertDetail{
 		FluxAlertInfo: info,
-		Conditions:    extractFluxConditions(obj),
+		Conditions:    crConditions(obj),
 		EventSources:  extractFluxObjectRefs(obj, obj.GetNamespace(), "eventSources"),
 		InclusionList: append([]string{}, inclusion...),
 		ExclusionList: append([]string{}, exclusion...),
@@ -806,8 +788,8 @@ func (m *ClientManager) GetFluxAlert(ctx context.Context, contextName, namespace
 }
 
 func extractFluxAlert(obj *unstructured.Unstructured) FluxAlertInfo {
-	conds := extractFluxConditions(obj)
-	readyStatus, readyMsg := readySummary(conds)
+	conds := crConditions(obj)
+	readyStatus, readyMsg := readyCondition(conds)
 	suspended, _, _ := unstructured.NestedBool(obj.Object, "spec", "suspend")
 	provider := nestedRefName(obj, "spec", "providerRef")
 	severity, _, _ := unstructured.NestedString(obj.Object, "spec", "eventSeverity")
@@ -880,19 +862,19 @@ type FluxReceiverInfo struct {
 
 type FluxReceiverDetail struct {
 	FluxReceiverInfo
-	Conditions []FluxCondition   `json:"conditions"`
+	Conditions []ConditionDetail `json:"conditions"`
 	Events     []string          `json:"events"`
 	Resources  []FluxAlertSource `json:"resources"`
 	Interval   string            `json:"interval"`
 }
 
 func (m *ClientManager) ListFluxReceivers(contextName, namespace string) []FluxReceiverInfo {
-	return listFluxRows(m, contextName, fluxReceiverGVR, namespace, extractFluxReceiver,
+	return listServedRows(m, contextName, fluxReceiverGR, namespace, extractFluxReceiver,
 		func(r FluxReceiverInfo) (string, string) { return r.Namespace, r.Name })
 }
 
 func (m *ClientManager) GetFluxReceiver(ctx context.Context, contextName, namespace, name string) (*FluxReceiverDetail, error) {
-	obj, err := m.crForDetail(ctx, contextName, fluxReceiverGVR, namespace, name)
+	obj, err := m.getServedCR(ctx, contextName, fluxReceiverGR, namespace, name)
 	if err != nil {
 		return nil, err
 	}
@@ -901,7 +883,7 @@ func (m *ClientManager) GetFluxReceiver(ctx context.Context, contextName, namesp
 	interval, _, _ := unstructured.NestedString(obj.Object, "spec", "interval")
 	return &FluxReceiverDetail{
 		FluxReceiverInfo: info,
-		Conditions:       extractFluxConditions(obj),
+		Conditions:       crConditions(obj),
 		Events:           append([]string{}, events...),
 		Resources:        extractFluxObjectRefs(obj, obj.GetNamespace(), "resources"),
 		Interval:         interval,
@@ -909,8 +891,8 @@ func (m *ClientManager) GetFluxReceiver(ctx context.Context, contextName, namesp
 }
 
 func extractFluxReceiver(obj *unstructured.Unstructured) FluxReceiverInfo {
-	conds := extractFluxConditions(obj)
-	readyStatus, readyMsg := readySummary(conds)
+	conds := crConditions(obj)
+	readyStatus, readyMsg := readyCondition(conds)
 	suspended, _, _ := unstructured.NestedBool(obj.Object, "spec", "suspend")
 	recvType, _, _ := unstructured.NestedString(obj.Object, "spec", "type")
 	// .status.webhookPath shows up only after the receiver becomes Ready
@@ -941,17 +923,10 @@ func extractFluxReceiver(obj *unstructured.Unstructured) FluxReceiverInfo {
 // it up on its next sync poll (interval ≤ a few seconds typically) and
 // reconciles immediately, the same path `flux reconcile <kind> <name>` uses.
 func (m *ClientManager) ReconcileFluxResource(ctx context.Context, contextName, kind, namespace, name string) error {
-	if err := m.assertWritable(contextName); err != nil {
-		return err
-	}
 	if kind == "FluxImagePolicy" {
 		return fmt.Errorf("reconcile the ImagePolicy's ImageRepository to refresh its tags")
 	}
-	gvr, err := m.fluxActionGVR(contextName, kind)
-	if err != nil {
-		return err
-	}
-	dyn, err := m.dynamicClient(contextName)
+	gr, err := fluxActionResource(kind)
 	if err != nil {
 		return err
 	}
@@ -962,14 +937,7 @@ func (m *ClientManager) ReconcileFluxResource(ctx context.Context, contextName, 
 			},
 		},
 	}
-	body, err := json.Marshal(patch)
-	if err != nil {
-		return err
-	}
-	_, err = dyn.Resource(gvr).Namespace(namespace).Patch(
-		ctx, name, types.MergePatchType, body, metav1.PatchOptions{},
-	)
-	if err != nil {
+	if err := m.mergePatchCR(ctx, contextName, gr, namespace, name, patch); err != nil {
 		return fmt.Errorf("reconcile %s %s/%s: %w", kind, namespace, name, err)
 	}
 	return nil
@@ -979,33 +947,20 @@ func (m *ClientManager) ReconcileFluxResource(ctx context.Context, contextName, 
 // controller leaves the resource alone — useful for taking a managed
 // workload offline temporarily without deleting the Flux object.
 func (m *ClientManager) SetFluxResourceSuspended(ctx context.Context, contextName, kind, namespace, name string, suspended bool) error {
-	if err := m.assertWritable(contextName); err != nil {
-		return err
-	}
-	gvr, err := m.fluxActionGVR(contextName, kind)
+	gr, err := fluxActionResource(kind)
 	if err != nil {
 		return err
 	}
-	if kind == "FluxImagePolicy" && gvr.Version != "v1" {
+	// spec.suspend arrived in ImagePolicy with image.toolkit.fluxcd.io/v1.
+	if gvr, ok := m.servedGVR(contextName, gr); kind == "FluxImagePolicy" && ok && gvr.Version != "v1" {
 		return fmt.Errorf("suspending ImagePolicy requires image.toolkit.fluxcd.io/v1")
-	}
-	dyn, err := m.dynamicClient(contextName)
-	if err != nil {
-		return err
 	}
 	patch := map[string]any{
 		"spec": map[string]any{
 			"suspend": suspended,
 		},
 	}
-	body, err := json.Marshal(patch)
-	if err != nil {
-		return err
-	}
-	_, err = dyn.Resource(gvr).Namespace(namespace).Patch(
-		ctx, name, types.MergePatchType, body, metav1.PatchOptions{},
-	)
-	if err != nil {
+	if err := m.mergePatchCR(ctx, contextName, gr, namespace, name, patch); err != nil {
 		return fmt.Errorf("suspend %s %s/%s: %w", kind, namespace, name, err)
 	}
 	return nil
@@ -1014,33 +969,6 @@ func (m *ClientManager) SetFluxResourceSuspended(ctx context.Context, contextNam
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
-
-// listFluxRows reads the cached CRs for a Flux GVR, projects each through
-// extract, and returns the rows sorted by (namespace, name). Collapses the nine
-// otherwise-identical ListFlux* bodies.
-func listFluxRows[I any](
-	m *ClientManager,
-	contextName string,
-	gvr schema.GroupVersionResource,
-	namespace string,
-	extract func(*unstructured.Unstructured) I,
-	key func(I) (string, string),
-) []I {
-	if gvr.Group == fluxImageGroup {
-		served, ok := m.servedGVR(contextName, gvr.Group, gvr.Resource)
-		if !ok {
-			return []I{}
-		}
-		gvr = served
-	}
-	objs := listCachedCRs(m, contextName, gvr, namespace)
-	out := make([]I, 0, len(objs))
-	for _, obj := range objs {
-		out = append(out, extract(obj))
-	}
-	sortByNamespaceName(out, func(i int) (string, string) { return key(out[i]) })
-	return out
-}
 
 // nestedRefName reads the ".name" of a Flux object reference (secretRef,
 // certSecretRef, providerRef, …) at the given path, returning "" when absent.
@@ -1078,32 +1006,6 @@ func extractFluxObjectRefs(obj *unstructured.Unstructured, parentNS, specKey str
 		out = append(out, FluxAlertSource{Kind: kind, Name: name, Namespace: ns})
 	}
 	return out
-}
-
-// extractFluxConditions reads .status.conditions[] in the metav1.Condition
-// shape every Flux CR uses. Returns an empty slice (not nil) so the JSON
-// encoder never emits `null` for a missing status block.
-func extractFluxConditions(obj *unstructured.Unstructured) []FluxCondition {
-	return extractConditions(obj, func(t, s, reason, message, ts string) FluxCondition {
-		return FluxCondition{Type: t, Status: s, Reason: reason, Message: message, LastTransitionTime: ts}
-	})
-}
-
-// readySummary returns the (status, message) pair of the Ready condition,
-// which Flux conventionally uses as the user-facing health signal. Empty
-// strings when there's no Ready condition yet (resource still being
-// reconciled the first time).
-func readySummary(conds []FluxCondition) (status, message string) {
-	for _, c := range conds {
-		if c.Type == "Ready" {
-			msg := c.Message
-			if msg == "" {
-				msg = c.Reason
-			}
-			return c.Status, msg
-		}
-	}
-	return "", ""
 }
 
 // formatSourceRef collapses a Flux sourceRef block (kind+name, optionally

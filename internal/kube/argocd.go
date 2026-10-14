@@ -10,9 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/util/retry"
 )
 
 // ArgoApplicationInfo is the row shape the Argo Applications view renders.
@@ -39,13 +37,8 @@ type ArgoApplicationInfo struct {
 // Caller should have started the CR watch first (the frontend does this on
 // view mount).
 func (m *ClientManager) ListArgoApplications(contextName, namespace string) []ArgoApplicationInfo {
-	objs := listCachedCRs(m, contextName, argoApplicationGVR, namespace)
-	out := make([]ArgoApplicationInfo, 0, len(objs))
-	for _, obj := range objs {
-		out = append(out, extractArgoApplication(obj))
-	}
-	sortByNamespaceName(out, func(i int) (string, string) { return out[i].Namespace, out[i].Name })
-	return out
+	return listServedRows(m, contextName, argoApplicationGR, namespace, extractArgoApplication,
+		func(r ArgoApplicationInfo) (string, string) { return r.Namespace, r.Name })
 }
 
 func extractArgoApplication(obj *unstructured.Unstructured) ArgoApplicationInfo {
@@ -111,13 +104,8 @@ type ArgoApplicationResource struct {
 	Message   string `json:"message"`
 }
 
-// argoApplicationGVR is the canonical GVR for argoproj.io/v1alpha1 Applications.
-// Argo CD has used the same group + v1alpha1 storage version since 1.0.
-var argoApplicationGVR = schema.GroupVersionResource{
-	Group:    "argoproj.io",
-	Version:  "v1alpha1",
-	Resource: "applications",
-}
+// argoApplicationGR is Argo CD's Application.
+var argoApplicationGR = schema.GroupResource{Group: "argoproj.io", Resource: "applications"}
 
 // ArgoSyncResourceSelector targets a specific managed resource for a
 // selective sync. All four fields must match an entry in
@@ -224,22 +212,7 @@ func buildArgoRollbackPatch(id int64, prune bool) map[string]any {
 // clears the field. An empty Revision is sent as "HEAD" and an empty Strategy
 // as "hook" (sync waves and hooks honoured), matching the CLI defaults.
 func (m *ClientManager) SyncArgoApplication(ctx context.Context, contextName, namespace, name string, opts ArgoSyncOptions) error {
-	if err := m.assertWritable(contextName); err != nil {
-		return err
-	}
-	dyn, err := m.dynamicClient(contextName)
-	if err != nil {
-		return err
-	}
-
-	body, err := json.Marshal(buildArgoSyncPatch(opts))
-	if err != nil {
-		return err
-	}
-	_, err = dyn.Resource(argoApplicationGVR).Namespace(namespace).Patch(
-		ctx, name, types.MergePatchType, body, metav1.PatchOptions{},
-	)
-	if err != nil {
+	if err := m.mergePatchCR(ctx, contextName, argoApplicationGR, namespace, name, buildArgoSyncPatch(opts)); err != nil {
 		return fmt.Errorf("sync %s/%s: %w", namespace, name, err)
 	}
 	return nil
@@ -249,7 +222,7 @@ func (m *ClientManager) SyncArgoApplication(ctx context.Context, contextName, na
 // and returns it in a typed form so the frontend can render a table of
 // managed resources and let the user drill into each one.
 func (m *ClientManager) ListArgoApplicationResources(ctx context.Context, contextName, namespace, name string) ([]ArgoApplicationResource, error) {
-	obj, err := m.crForDetail(ctx, contextName, argoApplicationGVR, namespace, name)
+	obj, err := m.getServedCR(ctx, contextName, argoApplicationGR, namespace, name)
 	if err != nil {
 		return nil, err
 	}
@@ -321,7 +294,7 @@ type ArgoApplicationHealth struct {
 // GetArgoApplicationHealth projects the app-level health summary from the
 // Application CR.
 func (m *ClientManager) GetArgoApplicationHealth(ctx context.Context, contextName, namespace, name string) (ArgoApplicationHealth, error) {
-	obj, err := m.crForDetail(ctx, contextName, argoApplicationGVR, namespace, name)
+	obj, err := m.getServedCR(ctx, contextName, argoApplicationGR, namespace, name)
 	if err != nil {
 		return ArgoApplicationHealth{}, err
 	}
@@ -380,14 +353,10 @@ const argoResourcesFinalizer = "resources-finalizer.argocd.argoproj.io"
 //   - "non-cascading": strip the finalizer, DELETE with orphan propagation;
 //     the managed resources stay.
 func (m *ClientManager) DeleteArgoApplication(ctx context.Context, contextName, namespace, name, cascade string) error {
-	if err := m.assertWritable(contextName); err != nil {
-		return err
-	}
-	dyn, err := m.dynamicClient(contextName)
+	resource, err := m.writableResource(contextName, argoApplicationGR, namespace)
 	if err != nil {
 		return err
 	}
-	resource := dyn.Resource(argoApplicationGVR).Namespace(namespace)
 
 	var propagation metav1.DeletionPropagation
 	switch cascade {
@@ -420,15 +389,7 @@ func (m *ClientManager) DeleteArgoApplication(ctx context.Context, contextName, 
 // Application. It's a Get → mutate → Update because the unstructured
 // dynamic client can't strategic-merge a list field cleanly.
 func setArgoFinalizer(ctx context.Context, resource dynamic.ResourceInterface, name string, want bool) error {
-	// The Argo controller writes .status frequently, so a bare Get → Update
-	// races it and 409s; retry on conflict with a fresh Get each round. The
-	// callback returns raw errors so RetryOnConflict can detect the 409 (it
-	// inspects the error directly and won't unwrap a wrapped one).
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		obj, err := resource.Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
+	err := updateCR(ctx, resource, name, func(obj *unstructured.Unstructured) (bool, error) {
 		finalizers := obj.GetFinalizers()
 		has := false
 		idx := -1
@@ -445,10 +406,9 @@ func setArgoFinalizer(ctx context.Context, resource dynamic.ResourceInterface, n
 		case !want && has:
 			obj.SetFinalizers(append(finalizers[:idx], finalizers[idx+1:]...))
 		default:
-			return nil
+			return false, nil
 		}
-		_, err = resource.Update(ctx, obj, metav1.UpdateOptions{})
-		return err
+		return true, nil
 	})
 	if err != nil {
 		return fmt.Errorf("set finalizer on application %s: %w", name, err)
@@ -474,7 +434,7 @@ type ArgoApplicationHistoryEntry struct {
 // ListArgoApplicationHistory returns the .status.history[] entries newest-
 // first. Empty slice (not nil) when the Application has no history yet.
 func (m *ClientManager) ListArgoApplicationHistory(ctx context.Context, contextName, namespace, name string) ([]ArgoApplicationHistoryEntry, error) {
-	obj, err := m.crForDetail(ctx, contextName, argoApplicationGVR, namespace, name)
+	obj, err := m.getServedCR(ctx, contextName, argoApplicationGR, namespace, name)
 	if err != nil {
 		return nil, err
 	}
@@ -532,21 +492,7 @@ func extractArgoHistoryEntry(m map[string]any) ArgoApplicationHistoryEntry {
 // entry. prune=true also removes resources that were created after that
 // history entry (matches `argocd app rollback --prune`).
 func (m *ClientManager) RollbackArgoApplication(ctx context.Context, contextName, namespace, name string, id int64, prune bool) error {
-	if err := m.assertWritable(contextName); err != nil {
-		return err
-	}
-	dyn, err := m.dynamicClient(contextName)
-	if err != nil {
-		return err
-	}
-	body, err := json.Marshal(buildArgoRollbackPatch(id, prune))
-	if err != nil {
-		return err
-	}
-	_, err = dyn.Resource(argoApplicationGVR).Namespace(namespace).Patch(
-		ctx, name, types.MergePatchType, body, metav1.PatchOptions{},
-	)
-	if err != nil {
+	if err := m.mergePatchCR(ctx, contextName, argoApplicationGR, namespace, name, buildArgoRollbackPatch(id, prune)); err != nil {
 		return fmt.Errorf("rollback %s/%s to id=%d: %w", namespace, name, id, err)
 	}
 	return nil
@@ -585,7 +531,7 @@ type ArgoOperationState struct {
 // GetArgoApplicationOperationState reads .status.operationState. Empty
 // state (phase="") when Argo has never run an operation on this Application.
 func (m *ClientManager) GetArgoApplicationOperationState(ctx context.Context, contextName, namespace, name string) (ArgoOperationState, error) {
-	obj, err := m.crForDetail(ctx, contextName, argoApplicationGVR, namespace, name)
+	obj, err := m.getServedCR(ctx, contextName, argoApplicationGR, namespace, name)
 	if err != nil {
 		return ArgoOperationState{}, err
 	}
@@ -645,24 +591,11 @@ const argoAutomationBackupAnnotation = "klustr.io/argo-automation-suspended"
 // moves the block into argoAutomationBackupAnnotation; resuming moves it back,
 // or sets {} when there is no backup.
 func (m *ClientManager) SetArgoApplicationAutomation(ctx context.Context, contextName, namespace, name string, enabled bool) error {
-	if err := m.assertWritable(contextName); err != nil {
-		return err
-	}
-	dyn, err := m.dynamicClient(contextName)
+	resource, err := m.writableResource(contextName, argoApplicationGR, namespace)
 	if err != nil {
 		return err
 	}
-	resource := dyn.Resource(argoApplicationGVR).Namespace(namespace)
-	// The Argo application-controller writes .status on every reconcile, so a
-	// bare Get → Update of spec races it and 409s; retry on conflict with a
-	// fresh Get each round (mirrors setArgoFinalizer). The callback returns raw
-	// errors so RetryOnConflict can detect the 409.
-	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		obj, err := resource.Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-
+	err = updateCR(ctx, resource, name, func(obj *unstructured.Unstructured) (bool, error) {
 		annotations := obj.GetAnnotations()
 		if annotations == nil {
 			annotations = map[string]string{}
@@ -680,7 +613,7 @@ func (m *ClientManager) SetArgoApplicationAutomation(ctx context.Context, contex
 				automated = map[string]any{}
 			}
 			if err := unstructured.SetNestedField(obj.Object, automated, "spec", "syncPolicy", "automated"); err != nil {
-				return err
+				return false, err
 			}
 		} else {
 			if current, found, _ := unstructured.NestedMap(obj.Object, "spec", "syncPolicy", "automated"); found {
@@ -691,9 +624,7 @@ func (m *ClientManager) SetArgoApplicationAutomation(ctx context.Context, contex
 			}
 			unstructured.RemoveNestedField(obj.Object, "spec", "syncPolicy", "automated")
 		}
-
-		_, err = resource.Update(ctx, obj, metav1.UpdateOptions{})
-		return err
+		return true, nil
 	})
 	if err != nil {
 		return fmt.Errorf("update automation on %s/%s: %w", namespace, name, err)
@@ -705,15 +636,8 @@ func (m *ClientManager) SetArgoApplicationAutomation(ctx context.Context, contex
 // without running a sync, via the `argocd.argoproj.io/refresh` annotation.
 // mode is "normal" or "hard"; empty defaults to "normal".
 func (m *ClientManager) RefreshArgoApplication(ctx context.Context, contextName, namespace, name, mode string) error {
-	if err := m.assertWritable(contextName); err != nil {
-		return err
-	}
 	if mode == "" {
 		mode = "normal"
-	}
-	dyn, err := m.dynamicClient(contextName)
-	if err != nil {
-		return err
 	}
 	patch := map[string]any{
 		"metadata": map[string]any{
@@ -722,14 +646,7 @@ func (m *ClientManager) RefreshArgoApplication(ctx context.Context, contextName,
 			},
 		},
 	}
-	body, err := json.Marshal(patch)
-	if err != nil {
-		return err
-	}
-	_, err = dyn.Resource(argoApplicationGVR).Namespace(namespace).Patch(
-		ctx, name, types.MergePatchType, body, metav1.PatchOptions{},
-	)
-	if err != nil {
+	if err := m.mergePatchCR(ctx, contextName, argoApplicationGR, namespace, name, patch); err != nil {
 		return fmt.Errorf("refresh %s/%s: %w", namespace, name, err)
 	}
 	return nil
