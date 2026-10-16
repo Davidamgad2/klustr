@@ -324,7 +324,12 @@ export type TCPRouteDetail = kube.TCPRouteDetail
 export type TCPRouteInfo = kube.TCPRouteInfo
 export type TLSRouteDetail = kube.TLSRouteDetail
 export type TLSRouteInfo = kube.TLSRouteInfo
+export type TektonBindingRef = kube.TektonBindingRef
 export type TektonParam = kube.TektonParam
+export type TektonInterceptor = kube.TektonInterceptor
+export type TektonTriggerSpec = kube.TektonTriggerSpec
+export type TektonEventListenerDetail = kube.TektonEventListenerDetail
+export type TektonEventListenerInfo = kube.TektonEventListenerInfo
 export type TektonParamSpec = kube.TektonParamSpec
 export type TektonPipelineTaskSpec = kube.TektonPipelineTaskSpec
 export type TektonResultSpec = kube.TektonResultSpec
@@ -336,12 +341,22 @@ export type TektonWorkspaceBinding = kube.TektonWorkspaceBinding
 export type TektonTaskCounts = kube.TektonTaskCounts
 export type TektonPipelineRunDetail = kube.TektonPipelineRunDetail
 export type TektonPipelineRunInfo = kube.TektonPipelineRunInfo
+export type TektonStartWorkspace = kube.TektonStartWorkspace
+export type TektonStartParam = kube.TektonStartParam
+export type TektonStartOptions = kube.TektonStartOptions
 export type TektonStep = kube.TektonStep
 export type TektonTaskStep = kube.TektonTaskStep
 export type TektonTaskDetail = kube.TektonTaskDetail
 export type TektonTaskInfo = kube.TektonTaskInfo
 export type TektonTaskRunDetail = kube.TektonTaskRunDetail
 export type TektonTaskRunInfo = kube.TektonTaskRunInfo
+export type TektonTemplateResource = kube.TektonTemplateResource
+export type TektonTriggerBindingDetail = kube.TektonTriggerBindingDetail
+export type TektonTriggerBindingInfo = kube.TektonTriggerBindingInfo
+export type TektonTriggerDetail = kube.TektonTriggerDetail
+export type TektonTriggerInfo = kube.TektonTriggerInfo
+export type TektonTriggerTemplateDetail = kube.TektonTriggerTemplateDetail
+export type TektonTriggerTemplateInfo = kube.TektonTriggerTemplateInfo
 export type UDPRouteDetail = kube.UDPRouteDetail
 export type UDPRouteInfo = kube.UDPRouteInfo
 export type VolumeAttachmentDetail = kube.VolumeAttachmentDetail
@@ -479,10 +494,15 @@ export const generatedApi = {
   getSubjectAccess: bindings.GetSubjectAccess,
   getTCPRoute: bindings.GetTCPRoute,
   getTLSRoute: bindings.GetTLSRoute,
+  getTektonClusterTriggerBinding: bindings.GetTektonClusterTriggerBinding,
+  getTektonEventListener: bindings.GetTektonEventListener,
   getTektonPipeline: bindings.GetTektonPipeline,
   getTektonPipelineRun: bindings.GetTektonPipelineRun,
   getTektonTask: bindings.GetTektonTask,
   getTektonTaskRun: bindings.GetTektonTaskRun,
+  getTektonTrigger: bindings.GetTektonTrigger,
+  getTektonTriggerBinding: bindings.GetTektonTriggerBinding,
+  getTektonTriggerTemplate: bindings.GetTektonTriggerTemplate,
   getUDPRoute: bindings.GetUDPRoute,
   getValidatingAdmissionPolicy: bindings.GetValidatingAdmissionPolicy,
   getValidatingAdmissionPolicyBinding: bindings.GetValidatingAdmissionPolicyBinding,
@@ -618,10 +638,15 @@ export const generatedApi = {
   listSystemTerminals: bindings.ListSystemTerminals,
   listTCPRoutes: bindings.ListTCPRoutes,
   listTLSRoutes: bindings.ListTLSRoutes,
+  listTektonClusterTriggerBindings: bindings.ListTektonClusterTriggerBindings,
+  listTektonEventListeners: bindings.ListTektonEventListeners,
   listTektonPipelineRuns: bindings.ListTektonPipelineRuns,
   listTektonPipelines: bindings.ListTektonPipelines,
   listTektonTaskRuns: bindings.ListTektonTaskRuns,
   listTektonTasks: bindings.ListTektonTasks,
+  listTektonTriggerBindings: bindings.ListTektonTriggerBindings,
+  listTektonTriggerTemplates: bindings.ListTektonTriggerTemplates,
+  listTektonTriggers: bindings.ListTektonTriggers,
   listUDPRoutes: bindings.ListUDPRoutes,
   listValidatingAdmissionPolicies: bindings.ListValidatingAdmissionPolicies,
   listValidatingAdmissionPolicyBindings: bindings.ListValidatingAdmissionPolicyBindings,
@@ -670,6 +695,7 @@ export const generatedApi = {
   startPodDebug: bindings.StartPodDebug,
   startPodLogs: bindings.StartPodLogs,
   startPortForward: bindings.StartPortForward,
+  startTektonPipeline: bindings.StartTektonPipeline,
   startWatch: bindings.StartWatch,
   stopExec: bindings.StopExec,
   stopLocalTerminal: bindings.StopLocalTerminal,

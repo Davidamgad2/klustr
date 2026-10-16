@@ -255,6 +255,10 @@ export function GetTCPRoute(arg1:string,arg2:string,arg3:string):Promise<kube.TC
 
 export function GetTLSRoute(arg1:string,arg2:string,arg3:string):Promise<kube.TLSRouteDetail>;
 
+export function GetTektonClusterTriggerBinding(arg1:string,arg2:string):Promise<kube.TektonTriggerBindingDetail>;
+
+export function GetTektonEventListener(arg1:string,arg2:string,arg3:string):Promise<kube.TektonEventListenerDetail>;
+
 export function GetTektonPipeline(arg1:string,arg2:string,arg3:string):Promise<kube.TektonPipelineDetail>;
 
 export function GetTektonPipelineRun(arg1:string,arg2:string,arg3:string):Promise<kube.TektonPipelineRunDetail>;
@@ -262,6 +266,12 @@ export function GetTektonPipelineRun(arg1:string,arg2:string,arg3:string):Promis
 export function GetTektonTask(arg1:string,arg2:string,arg3:string):Promise<kube.TektonTaskDetail>;
 
 export function GetTektonTaskRun(arg1:string,arg2:string,arg3:string):Promise<kube.TektonTaskRunDetail>;
+
+export function GetTektonTrigger(arg1:string,arg2:string,arg3:string):Promise<kube.TektonTriggerDetail>;
+
+export function GetTektonTriggerBinding(arg1:string,arg2:string,arg3:string):Promise<kube.TektonTriggerBindingDetail>;
+
+export function GetTektonTriggerTemplate(arg1:string,arg2:string,arg3:string):Promise<kube.TektonTriggerTemplateDetail>;
 
 export function GetUDPRoute(arg1:string,arg2:string,arg3:string):Promise<kube.UDPRouteDetail>;
 
@@ -533,6 +543,10 @@ export function ListTCPRoutes(arg1:string,arg2:string):Promise<Array<kube.TCPRou
 
 export function ListTLSRoutes(arg1:string,arg2:string):Promise<Array<kube.TLSRouteInfo>>;
 
+export function ListTektonClusterTriggerBindings(arg1:string):Promise<Array<kube.TektonTriggerBindingInfo>>;
+
+export function ListTektonEventListeners(arg1:string,arg2:string):Promise<Array<kube.TektonEventListenerInfo>>;
+
 export function ListTektonPipelineRuns(arg1:string,arg2:string):Promise<Array<kube.TektonPipelineRunInfo>>;
 
 export function ListTektonPipelines(arg1:string,arg2:string):Promise<Array<kube.TektonPipelineInfo>>;
@@ -540,6 +554,12 @@ export function ListTektonPipelines(arg1:string,arg2:string):Promise<Array<kube.
 export function ListTektonTaskRuns(arg1:string,arg2:string):Promise<Array<kube.TektonTaskRunInfo>>;
 
 export function ListTektonTasks(arg1:string,arg2:string):Promise<Array<kube.TektonTaskInfo>>;
+
+export function ListTektonTriggerBindings(arg1:string,arg2:string):Promise<Array<kube.TektonTriggerBindingInfo>>;
+
+export function ListTektonTriggerTemplates(arg1:string,arg2:string):Promise<Array<kube.TektonTriggerTemplateInfo>>;
+
+export function ListTektonTriggers(arg1:string,arg2:string):Promise<Array<kube.TektonTriggerInfo>>;
 
 export function ListUDPRoutes(arg1:string,arg2:string):Promise<Array<kube.UDPRouteInfo>>;
 
@@ -636,6 +656,8 @@ export function StartPodDebug(arg1:string,arg2:string,arg3:string,arg4:string,ar
 export function StartPodLogs(arg1:string,arg2:string,arg3:string,arg4:string,arg5:boolean,arg6:boolean,arg7:number):Promise<string>;
 
 export function StartPortForward(arg1:string,arg2:string,arg3:string,arg4:number,arg5:number):Promise<kube.PortForwardInfo>;
+
+export function StartTektonPipeline(arg1:string,arg2:string,arg3:string,arg4:kube.TektonStartOptions):Promise<string>;
 
 export function StartWatch(arg1:string):Promise<void>;
 
