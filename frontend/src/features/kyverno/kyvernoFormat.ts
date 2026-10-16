@@ -1,4 +1,4 @@
-import type { KyvernoKind } from './kyvernoKinds'
+import type { KyvernoCELPolicyKind, KyvernoKind } from './kyvernoKinds'
 
 export type PolicyResult = 'fail' | 'error' | 'warn' | 'skip' | 'pass'
 
@@ -27,6 +27,15 @@ export function failureActionClass(action: string): string {
     default:
       return 'text-muted-foreground'
   }
+}
+
+// generatedOnPolicyDelete says what deleting a GeneratingPolicy does to the
+// objects it generated. Kyverno only removes synchronized generations, and
+// never clones, whose lifecycle follows their source.
+export function generatedOnPolicyDelete(synchronize: boolean, orphanOnDelete: boolean): string {
+  if (!synchronize) return 'keep generated objects (not synchronized)'
+  if (orphanOnDelete) return 'keep generated objects'
+  return 'delete generated objects (clones are kept)'
 }
 
 // ruleSummary renders a policy's rule counts, e.g. "2 validate, 1 mutate".
@@ -62,5 +71,14 @@ export function policyRefFromResult(
   if (source === 'KyvernoValidatingPolicy') {
     return { kind: namespace ? 'NamespacedValidatingPolicy' : 'ValidatingPolicy', namespace, name }
   }
+  const cel = REPORT_SOURCE_KIND[source]
+  if (cel) return { kind: namespace ? `Namespaced${cel}` : cel, namespace, name }
   return null
+}
+
+// The report sources Kyverno writes for the other CEL policy kinds.
+const REPORT_SOURCE_KIND: Record<string, KyvernoCELPolicyKind> = {
+  KyvernoMutatingPolicy: 'MutatingPolicy',
+  KyvernoGeneratingPolicy: 'GeneratingPolicy',
+  KyvernoImageValidatingPolicy: 'ImageValidatingPolicy',
 }

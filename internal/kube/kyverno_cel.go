@@ -9,9 +9,11 @@ import (
 )
 
 // Kyverno's CEL policy family (policies.kyverno.io, v1 since Kyverno 1.16)
-// mirrors Kubernetes ValidatingAdmissionPolicy. Klustr covers the validating
-// kinds: the cluster-scoped ValidatingPolicy and NamespacedValidatingPolicy,
-// which applies only within its own namespace.
+// mirrors Kubernetes ValidatingAdmissionPolicy. This file covers the
+// validating kinds: the cluster-scoped ValidatingPolicy and
+// NamespacedValidatingPolicy, which applies only within its own namespace.
+// The mutating, generating, deleting and image-validating kinds are in
+// kyverno_cel_policies.go.
 const (
 	kyvernoCELGroup                             = "policies.kyverno.io"
 	kyvernoValidatingPoliciesResource           = "validatingpolicies"
@@ -96,8 +98,18 @@ func (m *ClientManager) getKyvernoValidatingPolicy(ctx context.Context, contextN
 	return extractKyvernoValidatingPolicyDetail(obj), nil
 }
 
-func extractKyvernoValidatingPolicy(obj *unstructured.Unstructured) KyvernoValidatingPolicyInfo {
+// kyvernoValidationActions reads spec.validationActions. Kyverno enforces an
+// empty list as Deny, and the CRD stores no default, so a policy without the
+// field still blocks requests.
+func kyvernoValidationActions(obj *unstructured.Unstructured) []string {
 	actions, _, _ := unstructured.NestedStringSlice(obj.Object, "spec", "validationActions")
+	if len(actions) == 0 {
+		return []string{"Deny"}
+	}
+	return actions
+}
+
+func extractKyvernoValidatingPolicy(obj *unstructured.Unstructured) KyvernoValidatingPolicyInfo {
 	validations, _, _ := nestedSliceNoCopy(obj.Object, "spec", "validations")
 	ready := ""
 	if r, found, _ := unstructured.NestedBool(obj.Object, "status", "conditionStatus", "ready"); found {
@@ -109,7 +121,7 @@ func extractKyvernoValidatingPolicy(obj *unstructured.Unstructured) KyvernoValid
 	return KyvernoValidatingPolicyInfo{
 		Name:        obj.GetName(),
 		Namespace:   obj.GetNamespace(),
-		Actions:     append([]string{}, actions...),
+		Actions:     kyvernoValidationActions(obj),
 		Resources:   summarizeResourceRules(nestedField(obj.Object, "spec", "matchConstraints", "resourceRules")),
 		Validations: len(validations),
 		Admission:   nestedBoolOrTrue(obj.Object, "spec", "evaluation", "admission", "enabled"),
