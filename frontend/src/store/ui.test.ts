@@ -26,6 +26,238 @@ const {
 
 const baseSnapshot = useUIStore.getState()
 
+describe('resource inspector navigation', () => {
+  beforeEach(resetStore)
+  const pod = { kind: 'Pod', context: 'cluster-a', namespace: 'apps', name: 'api-a' }
+
+  it('retains reading tabs across rows and keeps source context in the selection', () => {
+    const s = useUIStore.getState()
+    s.setSelectedResource(pod)
+    s.setActiveDetailTab('logs')
+    s.setSelectedResource({ ...pod, context: 'cluster-b', name: 'api-b' })
+    expect(useUIStore.getState()).toMatchObject({
+      requestedTab: 'logs', selectedResource: { context: 'cluster-b', name: 'api-b' },
+    })
+  })
+
+  it.each(['exec', 'shell'])('does not carry %s connections to another resource', (tab) => {
+    const s = useUIStore.getState()
+    s.setSelectedResource(pod)
+    s.setActiveDetailTab(tab)
+    s.setSelectedResource({ ...pod, name: 'api-b' })
+    expect(useUIStore.getState().requestedTab).toBeNull()
+  })
+
+  it.each(['values', 'manifest', 'notes', 'history'])('retains the Helm %s tab between releases', (tab) => {
+    const s = useUIStore.getState()
+    const release = { ...pod, kind: 'HelmRelease' }
+    s.setSelectedResource(release)
+    s.setActiveDetailTab(tab)
+    s.setSelectedResource({ ...release, name: 'other-release' })
+    expect(useUIStore.getState().requestedTab).toBe(tab)
+  })
+
+  it.each([
+    ['violations', { group: 'kyverno.io', version: 'v1', resource: 'clusterpolicies' }],
+    ['requests', { group: 'cert-manager.io', version: 'v1', resource: 'certificates' }],
+    ['resources', { group: 'argoproj.io', version: 'v1alpha1', resource: 'applications' }],
+  ])('retains the integration %s tab between resources of the same kind and through Back', (tab, gvr) => {
+    const s = useUIStore.getState()
+    const cr = { ...pod, kind: 'Custom', gvr }
+    s.setSelectedResource(cr)
+    s.setActiveDetailTab(tab)
+    s.setSelectedResource({ ...cr, name: 'next' })
+    expect(useUIStore.getState().requestedTab).toBe(tab)
+    s.openResource(pod)
+    s.goBackResource()
+    expect(useUIStore.getState()).toMatchObject({ selectedResource: { name: 'next' }, requestedTab: tab })
+  })
+
+  it('keeps explicit terminal navigation available and ignores repeat row clicks', () => {
+    const s = useUIStore.getState()
+    s.openResource(pod, 'exec')
+    s.setSelectedResource({ ...pod })
+    expect(useUIStore.getState().requestedTab).toBe('exec')
+  })
+
+  it.each(['logs', 'events', 'yaml'] as const)('dispatches another %s request after manual navigation', (tab) => {
+    const s = useUIStore.getState()
+    s.openResource(pod, tab)
+    const firstRequest = useUIStore.getState().detailRequestId
+    s.setActiveDetailTab('overview')
+    s.openResource(pod, tab)
+    expect(useUIStore.getState().detailRequestId).toBeGreaterThan(firstRequest)
+    expect(useUIStore.getState().requestedTab).toBe(tab)
+  })
+
+  it('dispatches repeated container links even while Logs is already active', () => {
+    const s = useUIStore.getState()
+    const target = { ...pod, logContainer: 'app' }
+    s.openResource(target, 'logs')
+    s.setActiveDetailTab('logs')
+    const firstRequest = useUIStore.getState().detailRequestId
+    s.openResource(target, 'logs')
+    expect(useUIStore.getState().detailRequestId).toBeGreaterThan(firstRequest)
+    s.setSelectedResource({ ...target })
+    expect(useUIStore.getState().detailRequestId).toBe(firstRequest + 1)
+  })
+
+  it('keeps view and resource together when a palette jump is confirmed or cancelled', () => {
+    const s = useUIStore.getState()
+    const configMap = { ...pod, kind: 'ConfigMap', name: 'settings' }
+    s.setSelectedView('configmaps')
+    s.setSelectedResource(configMap)
+    s.setDetailDirty(true)
+    s.openResourceInView('pods', pod)
+    expect(useUIStore.getState()).toMatchObject({ selectedView: 'configmaps', selectedResource: configMap })
+    s.cancelDetailNavigation()
+    expect(useUIStore.getState()).toMatchObject({ selectedView: 'configmaps', selectedResource: configMap, detailDirty: true })
+    s.openResourceInView('pods', pod)
+    s.confirmDetailNavigation()
+    expect(useUIStore.getState()).toMatchObject({
+      selectedView: 'pods', selectedResource: pod, selectedCRDKey: null,
+      detailDirty: false, pendingDetailNavigation: null, resourceNavStack: [],
+    })
+  })
+
+  it('keeps the selection object when the inspected resource is chosen again', () => {
+    const s = useUIStore.getState()
+    s.setSelectedResource(pod)
+    const selected = useUIStore.getState().selectedResource
+    s.setSelectedResource({ ...pod })
+    s.openResource({ ...pod })
+    expect(useUIStore.getState().selectedResource).toBe(selected)
+    s.setSelectedResource({ ...pod, suspended: true })
+    expect(useUIStore.getState().selectedResource).toMatchObject({ suspended: true })
+  })
+
+  it('does not notify subscribers for an unchanged outside-results report', () => {
+    const listener = vi.fn()
+    const unsubscribe = useUIStore.subscribe(listener)
+    try {
+      useUIStore.getState().setDetailOutsideResults(false)
+      expect(listener).not.toHaveBeenCalled()
+      useUIStore.getState().setDetailOutsideResults(true)
+      expect(listener).toHaveBeenCalledOnce()
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it('keeps the destination under decision when a late request arrives', () => {
+    const s = useUIStore.getState()
+    s.setSelectedResource(pod)
+    s.setDetailDirty(true)
+    s.setSelectedResource(null)
+    s.openResource({ ...pod, name: 'manager' })
+    s.confirmDetailNavigation()
+    expect(useUIStore.getState().selectedResource).toBeNull()
+  })
+
+  it.each(['row', 'close', 'view', 'context', 'crd', 'back', 'tab'])(
+    'defers %s navigation until the draft is discarded', (target) => {
+      const s = useUIStore.getState()
+      s.setSelectedContext('cluster-a')
+      s.setSelectedResource(pod)
+      s.openResource({ ...pod, name: 'api-b' })
+      s.setDetailDirty(true)
+      const changeTab = vi.fn()
+      const actions = {
+        row: () => s.setSelectedResource({ ...pod, name: 'api-c' }),
+        close: () => s.setSelectedResource(null),
+        view: () => s.setSelectedView('nodes'),
+        context: () => s.setSelectedContext('cluster-b'),
+        crd: () => s.setSelectedCRD('example.io/widgets'),
+        back: () => s.goBackResource(),
+        tab: () => s.requestDetailNavigation(changeTab),
+      }
+      actions[target as keyof typeof actions]()
+      expect(useUIStore.getState().selectedResource?.name).toBe('api-b')
+      expect(useUIStore.getState().pendingDetailNavigation).toBeTypeOf('function')
+      expect(changeTab).not.toHaveBeenCalled()
+      const discards = useUIStore.getState().detailDiscardRequest
+      s.confirmDetailNavigation()
+      expect(useUIStore.getState().pendingDetailNavigation).toBeNull()
+      expect(useUIStore.getState().detailDirty).toBe(false)
+      expect(useUIStore.getState().detailDiscardRequest).toBe(discards + 1)
+      if (target === 'tab') expect(changeTab).toHaveBeenCalledOnce()
+      else expect(useUIStore.getState().selectedResource?.name).not.toBe('api-b')
+    },
+  )
+
+  it('keeps the draft and resource when navigation is cancelled', () => {
+    const s = useUIStore.getState()
+    s.setSelectedResource(pod)
+    s.setDetailDirty(true)
+    s.setSelectedResource(null)
+    s.cancelDetailNavigation()
+    expect(useUIStore.getState()).toMatchObject({ selectedResource: pod, detailDirty: true, pendingDetailNavigation: null })
+  })
+
+  it('closes a removed resource without asking about its draft', () => {
+    const s = useUIStore.getState()
+    s.setSelectedResource(pod)
+    s.setDetailDirty(true)
+    s.setSelectedResource({ ...pod, name: 'api-b' })
+    s.closeRemovedResource(pod)
+    expect(useUIStore.getState()).toMatchObject({
+      selectedResource: null, lastSelectedResource: pod, detailDirty: false, pendingDetailNavigation: null,
+    })
+  })
+
+  it('leaves the inspector alone when another resource is removed', () => {
+    const s = useUIStore.getState()
+    s.setSelectedResource(pod)
+    s.setDetailDirty(true)
+    s.closeRemovedResource({ ...pod, context: 'cluster-b' })
+    expect(useUIStore.getState()).toMatchObject({ selectedResource: pod, detailDirty: true })
+  })
+
+  it.each(['context', 'view', 'row', 'tab', 'empty history'])(
+    'keeps the editor without prompting for unchanged %s navigation', (target) => {
+      const s = useUIStore.getState()
+      s.setSelectedContext('cluster-a')
+      s.setSelectedView('pods')
+      s.setSelectedResource(pod)
+      s.setActiveDetailTab('yaml')
+      s.setDetailDirty(true)
+      const actions = {
+        context: () => s.setSelectedContext('cluster-a'),
+        view: () => s.setSelectedView('pods'),
+        row: () => s.setSelectedResource({ ...pod }),
+        tab: () => s.openResource({ ...pod }, 'yaml'),
+        'empty history': () => s.goBackResource(),
+      }
+      actions[target as keyof typeof actions]()
+      expect(useUIStore.getState()).toMatchObject({
+        selectedResource: pod, detailDirty: true, pendingDetailNavigation: null,
+      })
+    },
+  )
+
+  it('ignores repeated aggregate and custom-resource selections while editing', () => {
+    const s = useUIStore.getState()
+    s.setAggregatedContexts(['cluster-b', 'cluster-a'], 'local-group')
+    s.setSelectedCRD('example.io/widgets')
+    s.setSelectedResource(pod)
+    s.setDetailDirty(true)
+    s.setAggregatedContexts(['cluster-a', 'cluster-b', 'cluster-a'], 'local-group')
+    s.setSelectedCRD('example.io/widgets')
+    expect(useUIStore.getState()).toMatchObject({
+      selectedResource: pod, detailDirty: true, pendingDetailNavigation: null,
+    })
+  })
+
+  it('resizing and expansion do not change resource identity or navigation', () => {
+    const s = useUIStore.getState()
+    s.openResource(pod, 'exec')
+    s.setDetailWidth(620)
+    s.setDetailExpanded(true)
+    expect(useUIStore.getState()).toMatchObject({ selectedResource: pod, requestedTab: 'exec', detailWidth: 620 })
+    expect(localStorage.getItem('klustr-detail-width')).toBe('620')
+  })
+})
+
 function resetStore() {
   localStorage.clear()
   useUIStore.setState({
@@ -237,13 +469,33 @@ describe('resource navigation stack', () => {
     useUIStore.getState().openResource(node)
     const s = useUIStore.getState()
     expect(s.selectedResource).toEqual(node)
-    expect(s.resourceNavStack).toEqual([pod])
+    expect(s.resourceNavStack).toEqual([{ resource: pod, tab: 'overview' }])
   })
 
   it('opening the same resource twice does not push a duplicate', () => {
     useUIStore.getState().openResource(pod)
     useUIStore.getState().openResource(pod)
     expect(useUIStore.getState().resourceNavStack).toEqual([])
+  })
+
+  it('opening another row from the list starts a new history, like a row click', () => {
+    const s = useUIStore.getState()
+    s.setSelectedResource(pod)
+    s.openResource(node)
+    s.openResourceFromList({ ...pod, name: 'sibling' }, 'logs')
+    expect(useUIStore.getState()).toMatchObject({
+      selectedResource: { name: 'sibling' }, requestedTab: 'logs', resourceNavStack: [],
+    })
+  })
+
+  it('keeps the history when a list action targets the inspected resource', () => {
+    const s = useUIStore.getState()
+    s.setSelectedResource(pod)
+    s.openResource(node)
+    s.openResourceFromList(node, 'events')
+    expect(useUIStore.getState()).toMatchObject({
+      selectedResource: node, requestedTab: 'events', resourceNavStack: [{ resource: pod }],
+    })
   })
 
   it('goBackResource pops the stack', () => {
@@ -253,6 +505,36 @@ describe('resource navigation stack', () => {
     const s = useUIStore.getState()
     expect(s.selectedResource).toEqual(pod)
     expect(s.resourceNavStack).toEqual([])
+  })
+
+  it('returns to the reading tab after following a related resource', () => {
+    const s = useUIStore.getState()
+    s.openResource(pod)
+    s.setActiveDetailTab('events')
+    s.openResource(node)
+    s.setActiveDetailTab('overview')
+    s.goBackResource()
+    expect(useUIStore.getState()).toMatchObject({ selectedResource: pod, requestedTab: 'events' })
+  })
+
+  it.each(['exec', 'shell'])('does not reconnect a %s tab when returning through history', (tab) => {
+    const s = useUIStore.getState()
+    s.openResource(pod)
+    s.setActiveDetailTab(tab)
+    s.openResource(node)
+    s.goBackResource()
+    expect(useUIStore.getState()).toMatchObject({ selectedResource: pod, requestedTab: null })
+  })
+
+  it('clears resource history when switching contexts', () => {
+    const s = useUIStore.getState()
+    s.setSelectedContext('cluster-a')
+    s.openResource(pod)
+    s.setActiveDetailTab('logs')
+    s.openResource(node)
+    s.setSelectedContext('cluster-b')
+    s.goBackResource()
+    expect(useUIStore.getState()).toMatchObject({ selectedResource: null, resourceNavStack: [], requestedTab: null })
   })
 
   it('goBackResource is a no-op on an empty stack', () => {

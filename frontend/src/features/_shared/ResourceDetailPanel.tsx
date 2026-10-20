@@ -1,8 +1,7 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
-import { ArrowLeft, RefreshCcw } from 'lucide-react'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { lazy, memo, Suspense, useCallback, useEffect, useState, type ComponentProps } from 'react'
+import { ArrowLeft, Maximize2, Minimize2, RefreshCcw, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Tabs as UITabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { api, type PodDetail } from '@/lib/api'
 import { useUIStore, type DetailTab, type SelectedResource } from '@/store/ui'
 import { useResourceDetail } from './useResourceDetail'
@@ -10,6 +9,7 @@ import { ResourceManagersContext, useResourceManagers } from './useResourceManag
 import { ManagedByChips } from './ManagedByChips'
 import { CopyButton } from './Copyable'
 import { ContextBadge } from './ContextBadge'
+import { ResourceListNavigator } from './ResourceListNavigator'
 import { ErrorBoundary } from './ErrorBoundary'
 import { ErrorRecovery } from './ErrorRecovery'
 import { ErrorBox } from './DetailPrimitives'
@@ -165,41 +165,88 @@ function TerminalFallback() {
 type Props = {
   contextName: string | null
   resource: SelectedResource | null
+  expanded?: boolean
+  canSplit?: boolean
+  onToggleExpanded?: () => void
+  onClose?: () => void
 }
 
-export function ResourceDetailPanel({ contextName, resource }: Props) {
+// `selected` is the tab the user chose when it differs from the one shown (a
+// Policy tab waiting for its report). Moving to the next resource retains it,
+// not the Overview shown in the meantime.
+function Tabs({ value, selected, onValueChange, ...props }: ComponentProps<typeof UITabs> & { selected?: string }) {
+  const requestNavigation = useUIStore((s) => s.requestDetailNavigation)
+  const setActiveTab = useUIStore((s) => s.setActiveDetailTab)
+  const retained = selected ?? value
+  useEffect(() => { if (retained) setActiveTab(retained) }, [retained, setActiveTab])
+  return <UITabs {...props} value={value} activationMode="manual"
+    onValueChange={(next) => requestNavigation(() => onValueChange?.(next))} />
+}
+
+export const ResourceDetailPanel = memo(ResourceDetailPanelInner)
+
+function ResourceDetailPanelInner({ contextName, resource, expanded, canSplit, onToggleExpanded, onClose }: Props) {
   const setSelectedResource = useUIStore((s) => s.setSelectedResource)
+  const close = onClose ?? (() => setSelectedResource(null))
   const goBackResource = useUIStore((s) => s.goBackResource)
-  const canGoBack = useUIStore((s) => s.resourceNavStack.length > 0)
+  const previousResource = useUIStore((s) => s.resourceNavStack.at(-1)?.resource)
+  const dirty = useUIStore((s) => s.detailDirty)
   const readOnly = useUIStore((s) => s.globalReadOnly)
+  const outsideResults = useUIStore((s) => s.detailOutsideResults)
   const managers = useResourceManagers(contextName, resource)
-  const open = resource !== null
+  if (!resource) return null
+  const resourceKey = [
+    resource.context ?? '',
+    resource.gvr ? `${resource.gvr.group}/${resource.gvr.version}/${resource.gvr.resource}` : '',
+    resource.kind,
+    resource.namespace,
+    resource.name,
+  ].join('|')
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(o) => {
-        if (!o) setSelectedResource(null)
-      }}
-    >
-      <DialogContent className="flex h-[85vh] flex-col gap-0 overflow-hidden p-0 sm:max-w-6xl">
-        <DialogHeader className="flex flex-row items-start justify-between gap-4 border-b border-border px-6 py-4 pr-12">
-          {canGoBack && (
-            <Button
-              size="icon"
-              variant="ghost"
-              onClick={goBackResource}
-              aria-label="Back to previous resource"
-              className="-ml-2 mt-0.5 size-7 shrink-0"
-            >
-              <ArrowLeft className="size-4" />
-            </Button>
-          )}
-          <div className="min-w-0 flex-1 space-y-1">
-            <div className="text-xs uppercase tracking-wide text-muted-foreground">{resource?.kind}</div>
+      <section id="resource-detail-panel" data-resource-detail role="region" tabIndex={-1}
+        aria-labelledby="resource-detail-title"
+        className="resource-detail-panel flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring">
+        <header className="shrink-0 space-y-3 border-b border-border px-4 py-3">
+          <div className="space-y-1">
+            <div className="flex min-w-0 items-center gap-1">
+              {previousResource && (
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  onClick={goBackResource}
+                  aria-label="Back to previous resource"
+                  title={`Back to ${previousResource.kind}/${previousResource.name}`}
+                  className="-ml-1 size-6 shrink-0"
+                >
+                  <ArrowLeft className="size-4" />
+                </Button>
+              )}
+              <div className="min-w-0 flex-1 truncate text-xs uppercase tracking-wide text-muted-foreground" title={resource.kind}>
+                {resource.kind}
+              </div>
+              <ResourceListNavigator />
+              {canSplit && (
+                <Button
+                  size="icon" variant="ghost" className="size-6"
+                  aria-label={expanded ? 'Restore split view' : 'Expand resource details'}
+                  title={expanded ? 'Restore split view' : 'Expand resource details'}
+                  onClick={onToggleExpanded}
+                >
+                  {expanded ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}
+                </Button>
+              )}
+              <Button
+                size="icon" variant="ghost" className="size-6"
+                aria-label="Close resource details" title="Close resource details (Esc)"
+                onClick={close}
+              >
+                <X className="size-4" />
+              </Button>
+            </div>
             <div className="group flex min-w-0 items-center gap-1.5">
-              <DialogTitle className="truncate text-base">{resource?.name}</DialogTitle>
-              {resource?.name && (
+              <h2 id="resource-detail-title" className="truncate text-sm font-semibold" title={resource.name}>{resource.name}</h2>
+              {resource.name && (
                 <CopyButton
                   value={resource.name}
                   ariaLabel="Copy name"
@@ -207,12 +254,12 @@ export function ResourceDetailPanel({ contextName, resource }: Props) {
                 />
               )}
             </div>
-            {(contextName || resource?.namespace) && (
+            {(contextName || resource.namespace) && (
               <div className="flex min-w-0 flex-wrap items-center gap-2">
                 {contextName && (
                   <ContextBadge contextName={contextName} className="max-w-64" />
                 )}
-                {resource?.namespace && (
+                {resource.namespace && (
                   <div className="group flex min-w-0 items-center gap-1.5">
                     <div className="truncate text-xs text-muted-foreground">{resource.namespace}</div>
                     <CopyButton
@@ -224,11 +271,15 @@ export function ResourceDetailPanel({ contextName, resource }: Props) {
                   </div>
                 )}
                 <ManagedByChips contextName={contextName} managers={managers} />
+                {dirty && <span role="status" className="rounded border border-border px-1.5 py-0.5 text-[11px] text-foreground">Unapplied YAML</span>}
+                {outsideResults && <span role="status" className="text-xs text-muted-foreground">Outside current results</span>}
               </div>
             )}
           </div>
-          {resource && resource.kind !== 'HelmRelease' && (
-            <div className="flex shrink-0 items-center gap-2 pt-1">
+          {resource.kind !== 'HelmRelease' && (
+            // The selection can change while a confirmation is open, so
+            // remount the actions to close it rather than let it retarget.
+            <div key={resourceKey} className="flex flex-wrap items-center gap-2">
               {!readOnly && resource.kind === 'Pod' && (
                 <ResizePodButton
                   contextName={contextName}
@@ -313,34 +364,25 @@ export function ResourceDetailPanel({ contextName, resource }: Props) {
                 ))}
             </div>
           )}
-        </DialogHeader>
-        {resource && (
-          <ErrorBoundary
-            key={[
-              resource.context ?? '',
-              resource.gvr ? `${resource.gvr.group}/${resource.gvr.version}/${resource.gvr.resource}` : '',
-              resource.kind,
-              resource.namespace,
-              resource.name,
-            ].join('|')}
-            fallback={({ error, componentStack, reset }) => (
-              <ErrorRecovery
-                title="This resource detail could not be displayed"
-                description="The rest of Klustr is still available. Close this detail or try rendering it again."
-                error={error}
-                componentStack={componentStack}
-                onRetry={reset}
-                onDismiss={() => setSelectedResource(null)}
-              />
-            )}
-          >
-            <ResourceManagersContext.Provider value={managers}>
-              <DetailContent contextName={contextName} resource={resource} />
-            </ResourceManagersContext.Provider>
-          </ErrorBoundary>
-        )}
-      </DialogContent>
-    </Dialog>
+        </header>
+        <ErrorBoundary
+          key={resourceKey}
+          fallback={({ error, componentStack, reset }) => (
+            <ErrorRecovery
+              title="This resource detail could not be displayed"
+              description="The rest of Klustr is still available. Close this detail or try rendering it again."
+              error={error}
+              componentStack={componentStack}
+              onRetry={reset}
+              onDismiss={close}
+            />
+          )}
+        >
+          <ResourceManagersContext.Provider value={managers}>
+            <DetailContent contextName={contextName} resource={resource} />
+          </ResourceManagersContext.Provider>
+        </ErrorBoundary>
+      </section>
   )
 }
 
@@ -367,7 +409,7 @@ const EVENT_BEARING_KINDS: ResourceKind[] = [
 
 function DetailContent({ contextName, resource }: { contextName: string | null; resource: SelectedResource }) {
   if (resource.kind === 'HelmRelease') {
-    return <HelmReleaseTabs contextName={contextName} namespace={resource.namespace} name={resource.name} />
+    return <HelmReleaseTabs contextName={contextName} resource={resource} />
   }
   if (resource.gvr) {
     return <CustomResourceTabs contextName={contextName} resource={resource} />
@@ -380,14 +422,13 @@ function DetailContent({ contextName, resource }: { contextName: string | null; 
 
 function HelmReleaseTabs({
   contextName,
-  namespace,
-  name,
+  resource,
 }: {
   contextName: string | null
-  namespace: string
-  name: string
+  resource: SelectedResource
 }) {
-  const setSelectedResource = useUIStore((s) => s.setSelectedResource)
+  const { namespace, name } = resource
+  const closeRemovedResource = useUIStore((s) => s.closeRemovedResource)
   const [detail, setDetail] = useState<HelmReleaseDetail | null>(null)
   const [detailError, setDetailError] = useState<string | null>(null)
   const [reloadTick, setReloadTick] = useState(0)
@@ -468,7 +509,7 @@ function HelmReleaseTabs({
         name={name}
         open={uninstallOpen}
         onOpenChange={setUninstallOpen}
-        onUninstalled={() => setSelectedResource(null)}
+        onUninstalled={() => closeRemovedResource(resource)}
       />
     </>
   )
@@ -525,6 +566,7 @@ function CustomResourceTabs({ contextName, resource }: { contextName: string | n
         ? 'overview'
         : 'yaml'
   const requestedTab = useUIStore((s) => s.requestedTab)
+  const detailRequestId = useUIStore((s) => s.detailRequestId)
   const allowedTabs: string[] = []
   if (hasOverview) allowedTabs.push('overview')
   if (isArgoApp) allowedTabs.push('resources', 'history')
@@ -547,7 +589,7 @@ function CustomResourceTabs({ contextName, resource }: { contextName: string | n
     // eslint-disable-next-line react-hooks/set-state-in-effect -- Requested navigation synchronizes the controlled tab.
     setTab(resolveTab(requestedTab))
     // eslint-disable-next-line react-hooks/exhaustive-deps -- allowedTabs/initialTab derive from the identity deps below
-  }, [resource.kind, resource.namespace, resource.name, resource.gvr?.group, requestedTab])
+  }, [resource.kind, resource.namespace, resource.name, resource.gvr?.group, requestedTab, detailRequestId])
   return (
     <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 flex-1 flex-col">
       <TabsList className="mx-6 mt-3 w-fit">
@@ -748,13 +790,16 @@ function NonPodTabs({ contextName, resource }: { contextName: string | null; res
   )
   const policyReport = useResourcePolicyReport(contextName, resource.kind, resource.namespace, resource.name)
   const requestedTab = useUIStore((s) => s.requestedTab)
+  const detailRequestId = useUIStore((s) => s.detailRequestId)
   const allowed: DetailTab[] = ['overview']
   if (hasAggregatedLogs) allowed.push('logs')
   if (hasNodeShell) allowed.push('shell')
   if (hasDisruption) allowed.push('disruption')
   if (hasEvents) allowed.push('events')
   if (hasHistory) allowed.push('history')
-  if (policyReport) allowed.push('policy')
+  // The policy report loads after mount, so a requested Policy tab stays
+  // pending (showing Overview) until it arrives, as in PodTabs.
+  allowed.push('policy')
   allowed.push('yaml')
   const initialTab: DetailTab =
     requestedTab && allowed.includes(requestedTab) ? requestedTab : 'overview'
@@ -765,11 +810,16 @@ function NonPodTabs({ contextName, resource }: { contextName: string | null; res
     // eslint-disable-next-line react-hooks/set-state-in-effect -- Requested navigation synchronizes the controlled tab.
     setTab(requestedTab && allowed.includes(requestedTab) ? requestedTab : 'overview')
     // eslint-disable-next-line react-hooks/exhaustive-deps -- allowed is derived from the identity deps below
-  }, [resource.kind, resource.namespace, resource.name, requestedTab])
+  }, [resource.kind, resource.namespace, resource.name, requestedTab, detailRequestId])
+  const activeTab = tab === 'policy' && !policyReport ? 'overview' : tab
   return (
-    <Tabs value={tab} onValueChange={(v) => setTab(v as DetailTab)} className="flex min-h-0 flex-1 flex-col">
+    <Tabs value={activeTab} selected={tab} onValueChange={(v) => setTab(v as DetailTab)} className="flex min-h-0 flex-1 flex-col">
       <TabsList className="mx-6 mt-3 w-fit">
-        <TabsTrigger value="overview">Overview</TabsTrigger>
+        {/* A pending Policy tab already shows Overview, where Radix ignores the
+            click, so settle the choice here before a late report overrides it. */}
+        <TabsTrigger value="overview" onClick={() => { if (activeTab === 'overview') setTab('overview') }}>
+          Overview
+        </TabsTrigger>
         {hasAggregatedLogs && <TabsTrigger value="logs">Logs</TabsTrigger>}
         {hasNodeShell && <TabsTrigger value="shell">Shell</TabsTrigger>}
         {hasDisruption && <TabsTrigger value="disruption">Disruption</TabsTrigger>}
@@ -927,6 +977,7 @@ function PodTabs({
   )
   const policyReport = useResourcePolicyReport(contextName, 'Pod', namespace, name)
   const requestedTab = useUIStore((s) => s.requestedTab)
+  const detailRequestId = useUIStore((s) => s.detailRequestId)
   const requestedContainer = useUIStore((s) => s.selectedResource?.logContainer)
   const [tabState, setTabState] = useState(() => ({
     active: requestedTab ?? 'overview',
@@ -936,12 +987,15 @@ function PodTabs({
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- Requested navigation synchronizes the controlled tab.
-    setTabState({
+    setTabState((current) => ({
       active: requestedTab ?? 'overview',
-      logsMounted: requestedTab === 'logs',
-      execMounted: requestedTab === 'exec',
-    })
-  }, [namespace, name, requestedTab])
+      logsMounted: current.logsMounted || requestedTab === 'logs',
+      execMounted: current.execMounted || requestedTab === 'exec',
+    }))
+  }, [namespace, name, requestedTab, detailRequestId])
+  // Keep the requested Policy tab while its report loads, but always render an
+  // available body. Manual navigation replaces the pending preference.
+  const activeTab = tabState.active === 'policy' && !policyReport ? 'overview' : tabState.active
 
   const selectTab = (active: DetailTab) => {
     setTabState((current) => ({
@@ -952,9 +1006,12 @@ function PodTabs({
   }
 
   return (
-    <Tabs value={tabState.active} onValueChange={(v) => selectTab(v as DetailTab)} className="flex min-h-0 flex-1 flex-col">
+    <Tabs value={activeTab} selected={tabState.active} onValueChange={(v) => selectTab(v as DetailTab)} className="flex min-h-0 flex-1 flex-col">
       <TabsList className="mx-6 mt-3 w-fit">
-        <TabsTrigger value="overview">Overview</TabsTrigger>
+        {/* Settles a pending Policy tab, as in NonPodTabs. */}
+        <TabsTrigger value="overview" onClick={() => { if (activeTab === 'overview') selectTab('overview') }}>
+          Overview
+        </TabsTrigger>
         <TabsTrigger value="logs" disabled={!detail}>Logs</TabsTrigger>
         <TabsTrigger value="exec" disabled={!detail || detail.containers.length === 0}>Exec</TabsTrigger>
         <TabsTrigger value="events">Events</TabsTrigger>
@@ -997,7 +1054,8 @@ function PodTabs({
               detail={detail}
               contextName={contextName}
               initialContainer={requestedContainer}
-              active={tabState.active === 'logs'}
+              containerRequestId={requestedTab === 'logs' && requestedContainer ? detailRequestId : undefined}
+              active={activeTab === 'logs'}
             />
           </Suspense>
         )}
@@ -1008,7 +1066,7 @@ function PodTabs({
             <PodExecTab
               detail={detail}
               contextName={contextName}
-              active={tabState.active === 'exec'}
+              active={activeTab === 'exec'}
             />
           </Suspense>
         )}

@@ -49,6 +49,7 @@ function summarizeServerError(raw: string): string {
 export function ResourceYAMLTab({ contextName, kind, namespace, name, gvr }: Props) {
   const theme = useThemeMode()
   const readOnly = useUIStore((s) => s.globalReadOnly)
+  const setDetailDirty = useUIStore((s) => s.setDetailDirty)
   const managers = useManagers()
   const [source, setSource] = useState<string>('')
   const [draft, setDraft] = useState<string>('')
@@ -145,7 +146,19 @@ export function ResourceYAMLTab({ contextName, kind, namespace, name, gvr }: Pro
     dryRun.mutate()
   }
 
+  const discardRequest = useUIStore((s) => s.detailDiscardRequest)
+  const [handledDiscard, setHandledDiscard] = useState(discardRequest)
+  if (handledDiscard !== discardRequest) {
+    setHandledDiscard(discardRequest)
+    setDraft(source)
+    setEditing(false)
+  }
+
   const dirty = draft !== source
+  useEffect(() => {
+    setDetailDirty(editing && dirty)
+    return () => setDetailDirty(false)
+  }, [editing, dirty, setDetailDirty])
 
   const reviewError = dryRun.error ?? apply.error
   const reviewErrorFull = reviewError != null ? String(reviewError) : ''
@@ -167,7 +180,7 @@ export function ResourceYAMLTab({ contextName, kind, namespace, name, gvr }: Pro
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div data-resource-yaml className="flex h-full min-h-0 flex-col">
       <div className="flex items-center gap-2 border-b border-border px-4 py-2 text-xs">
         <span className="text-muted-foreground">YAML</span>
         <Button

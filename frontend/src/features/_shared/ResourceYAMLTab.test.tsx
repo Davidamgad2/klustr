@@ -18,6 +18,8 @@ type ChangeHandler = (
 const mocks = vi.hoisted(() => {
   const eventState: { handler: ChangeHandler | null } = { handler: null }
   return {
+    setDetailDirty: vi.fn(),
+    storeState: { detailDiscardRequest: 0 },
     eventState,
     getResourceYAML: vi.fn(),
     getCustomResourceYAML: vi.fn(),
@@ -43,12 +45,13 @@ vi.mock('@/lib/events', () => ({
 }))
 
 vi.mock('@/store/ui', () => ({
-  useUIStore: (selector: (state: { globalReadOnly: boolean }) => unknown) =>
-    selector({ globalReadOnly: false }),
+  useUIStore: (selector: (state: object) => unknown) =>
+    selector({ globalReadOnly: false, setDetailDirty: mocks.setDetailDirty, ...mocks.storeState }),
 }))
 
 vi.mock('@/lib/monaco', () => ({
-  Editor: ({ value }: { value: string }) => <pre data-testid="editor">{value}</pre>,
+  Editor: ({ value, onChange }: { value: string; onChange: (value: string) => void }) =>
+    <button data-testid="editor" onClick={() => onChange(`${value}# edited\n`)}>{value}</button>,
   DiffEditor: () => null,
 }))
 
@@ -99,6 +102,8 @@ describe('ResourceYAMLTab', () => {
     mocks.getResourceYAML.mockReset()
     mocks.getCustomResourceYAML.mockReset()
     mocks.onKubeChange.mockClear()
+    mocks.setDetailDirty.mockClear()
+    mocks.storeState.detailDiscardRequest = 0
   })
 
   afterEach(() => {
@@ -189,5 +194,35 @@ describe('ResourceYAMLTab', () => {
     expect(container.querySelector('[data-testid="copy-value"]')?.textContent).toContain(
       'resourceVersion: "1"',
     )
+  })
+
+  it('guards edited drafts and clears the guard when editing is cancelled', async () => {
+    mocks.getResourceYAML.mockResolvedValue('kind: Pod\n')
+    const queryClient = new QueryClient()
+    await act(async () => root.render(<QueryClientProvider client={queryClient}>
+      <ResourceYAMLTab contextName="test-context" kind="Pod" namespace="default" name="api" />
+    </QueryClientProvider>))
+    await act(async () => button(container, 'Edit').click())
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="editor"]')!.click())
+    expect(mocks.setDetailDirty).toHaveBeenLastCalledWith(true)
+    await act(async () => button(container, 'Cancel').click())
+    expect(mocks.setDetailDirty).toHaveBeenLastCalledWith(false)
+  })
+
+  it('drops the draft on a confirmed discard even when it stays mounted', async () => {
+    mocks.getResourceYAML.mockResolvedValue('kind: Pod\n')
+    const queryClient = new QueryClient()
+    const tab = () => <QueryClientProvider client={queryClient}>
+      <ResourceYAMLTab contextName="test-context" kind="Pod" namespace="default" name="api" />
+    </QueryClientProvider>
+    await act(async () => root.render(tab()))
+    await act(async () => button(container, 'Edit').click())
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="editor"]')!.click())
+    expect(mocks.setDetailDirty).toHaveBeenLastCalledWith(true)
+    mocks.storeState.detailDiscardRequest = 1
+    await act(async () => root.render(tab()))
+    expect(mocks.setDetailDirty).toHaveBeenLastCalledWith(false)
+    expect(container.textContent).not.toContain('# edited')
+    expect(button(container, 'Edit')).toBeTruthy()
   })
 })

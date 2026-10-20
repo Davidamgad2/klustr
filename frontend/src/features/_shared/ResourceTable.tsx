@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import {
   flexRender,
   getCoreRowModel,
@@ -28,7 +28,7 @@ import {
   X,
 } from 'lucide-react'
 import { isKindSynced, onKubeChange } from '@/lib/events'
-import { isEditableTarget } from '@/lib/dom'
+import { isEditableTarget, workspaceInspector } from '@/lib/dom'
 import { namespaceQuery } from '@/lib/namespaceFilter'
 import { stableList } from '@/lib/stableList'
 import { useNowTick } from '@/lib/nowTick'
@@ -36,6 +36,7 @@ import {
   useActiveContexts,
   useIsAggregated,
   useUIStore,
+  sameResource,
   type ResourceKind,
   type SelectedResource,
 } from '@/store/ui'
@@ -65,6 +66,9 @@ import { applyHeaderFilters, headerFilterOptions } from './headerFilter'
 import { parseSearch, rowMatchesSearch } from './rowSearch'
 import { KLUSTR_CTX, resolveResourceContexts, type Tagged } from './resourceContext'
 import { resourcePageCount } from './pagination'
+import { compactColumnIds } from './detailLayout'
+import { useElementWidth } from './useElementWidth'
+import { HELD_KEY_SETTLE_MS, ResourceNavigationContext, type ResourceNavigation } from './resourceNavigation'
 
 type RowIdentity = { namespace?: string; name?: string }
 
@@ -78,6 +82,9 @@ type LoadError = { message: string; retrying: boolean }
 // giving up (showing the possibly-empty result) only at the hard cap.
 const GRACE_STEP_MS = 5_000
 const GRACE_HARD_CAP_MS = 30_000
+
+// Beside an open inspector, a list narrower than this switches to compact columns.
+const NARROW_LIST_WIDTH = 720
 
 // Each source item gets exactly one tagged twin so the merged rows keep
 // referential equality across re-merges; stableList already guarantees a
@@ -168,6 +175,8 @@ type ResourceRowProps<T> = {
   columnOrder: string[]
   columnVisibility: VisibilityState
   isSelected: boolean
+  inspected: boolean
+  compactColumns: Set<string> | null
   flashing: boolean
   clickable: boolean
   onRowClick: (item: Tagged<T>) => void
@@ -181,6 +190,8 @@ function ResourceRowInner<T>({
   rowIndex,
   kind,
   isSelected,
+  inspected,
+  compactColumns,
   flashing,
   clickable,
   onRowClick,
@@ -199,6 +210,8 @@ function ResourceRowInner<T>({
     <tr
       ref={measureRef}
       data-index={rowIndex}
+      data-resource-row={rowKey ?? undefined}
+      aria-current={inspected ? 'true' : undefined}
       className={[
         'border-b border-border last:border-b-0 hover:bg-muted/50 transition-colors',
         clickable
@@ -206,10 +219,11 @@ function ResourceRowInner<T>({
           : '',
         flashing ? 'bg-emerald-100/60 dark:bg-emerald-400/15' : '',
         isSelected ? 'bg-primary/10' : '',
+        inspected ? 'bg-accent text-accent-foreground outline-1 -outline-offset-1 outline-primary/40' : '',
       ].join(' ')}
       role={clickable ? 'button' : undefined}
       tabIndex={clickable ? 0 : undefined}
-      onClick={clickable ? () => onRowClick(tagged) : undefined}
+      onClick={clickable ? (event) => { event.currentTarget.focus({ preventScroll: true }); onRowClick(tagged) } : undefined}
       onKeyDown={
         clickable
           ? (e) => {
@@ -217,6 +231,8 @@ function ResourceRowInner<T>({
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault()
                 onRowClick(tagged)
+                const row = e.currentTarget
+                requestAnimationFrame(() => workspaceInspector(row)?.focus())
               }
             }
           : undefined
@@ -231,12 +247,19 @@ function ResourceRowInner<T>({
           />
         )}
       </td>
-      {row.getVisibleCells().map((cell) => (
+      {row.getVisibleCells().filter((cell) => !compactColumns || compactColumns.has(cell.column.id)).map((cell) => (
         <td
           key={cell.id}
-          className="overflow-hidden truncate whitespace-nowrap px-3 py-1.5 align-middle"
+          className={`overflow-hidden truncate whitespace-nowrap py-1.5 align-middle ${compactColumns ? 'px-2' : 'px-3'}`}
         >
-          {flexRender(cell.column.columnDef.cell, cell.getContext())}
+          <div className="truncate" title={typeof cell.getValue() === 'string' ? cell.getValue() as string : undefined}>
+            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+          </div>
+          {compactColumns && cell.column.id === compactColumns.values().next().value && <div className="flex min-w-0 items-center gap-1 font-mono text-[11px] text-muted-foreground"
+            title={`${ctx}${identity.namespace ? ` / ${identity.namespace}` : ''}`}>
+            {identity.namespace && <><span className="max-w-1/2 shrink-0 truncate">{identity.namespace}</span><span aria-hidden>·</span></>}
+            <span className="truncate">{ctx}</span>
+          </div>}
         </td>
       ))}
       <td aria-hidden />
@@ -272,6 +295,8 @@ const ResourceRow = memo(ResourceRowInner, (prev, next) => {
     prev.columnOrder === next.columnOrder &&
     prev.columnVisibility === next.columnVisibility &&
     prev.isSelected === next.isSelected &&
+    prev.inspected === next.inspected &&
+    prev.compactColumns === next.compactColumns &&
     prev.flashing === next.flashing &&
     prev.clickable === next.clickable
   )
@@ -300,6 +325,20 @@ export function ResourceTable<T>({
   const readOnly = useUIStore((s) => s.globalReadOnly)
   const selectedResource = useUIStore((s) => s.selectedResource)
   const lastSelectedResource = useUIStore((s) => s.lastSelectedResource)
+  const setOutsideResults = useUIStore((s) => s.setDetailOutsideResults)
+  const requestNavigation = useUIStore((s) => s.requestDetailNavigation)
+  const setResourceNavigation = useContext(ResourceNavigationContext)?.set
+  const tableRef = useRef<HTMLDivElement>(null)
+  const followTimer = useRef<number>(undefined)
+  // Any selection change (closing, another row, a context switch, which
+  // clears the selection) supersedes a held arrow's pending follow.
+  useEffect(() => () => window.clearTimeout(followTimer.current), [selectedResource])
+  // Above the compact threshold only "wide" matters, so dragging the divider
+  // over a wide list doesn't re-render the table every frame.
+  const { ref: scrollRef, attach: attachScroll, width: tableWidth } = useElementWidth<HTMLDivElement>(NARROW_LIST_WIDTH)
+  const [fullColumns, setFullColumns] = useState(false)
+  const narrow = selectedResource !== null && tableWidth > 0 && tableWidth < NARROW_LIST_WIDTH
+  const compact = narrow && !fullColumns
   // Key on the selection *content*, not the array ref — the store
   // hands back a fresh array even for an unchanged selection, and a new query
   // object would tear down the fetch effect and refetch every context.
@@ -410,6 +449,13 @@ export function ResourceTable<T>({
   useEffect(() => {
     setSelectedKeys(new Set())
   }, [resourceContexts, selectedNamespaces, kind])
+  // A search typed for one cluster does not carry over to another. It does
+  // survive an empty namespace, where the user is usually about to go back.
+  // Keyed on content: a capability-filtered context list is a fresh array.
+  const contextsKey = resourceContexts.join('\n')
+  useEffect(() => {
+    setFilter('')
+  }, [contextsKey])
   useEffect(() => {
     setPageIndex(0)
   }, [resourceContexts, selectedNamespaces, kind, appliedFilter, headerFilterValues, pageSize])
@@ -463,10 +509,6 @@ export function ResourceTable<T>({
     const id = window.setTimeout(() => setFlashKey(null), 1_200)
     return () => window.clearTimeout(id)
   }, [selectedResource, lastSelectedResource, resourceContexts])
-
-  useEffect(() => {
-    if (mergedData.length === 0) setFilter('')
-  }, [mergedData.length])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -701,6 +743,9 @@ export function ResourceTable<T>({
     for (const id of allColumnIds) v[id] = !(prefs?.hidden ?? []).includes(id)
     return v
   }, [allColumnIds, prefs?.hidden])
+  const compactColumns = useMemo(() => compact
+    ? compactColumnIds(allColumnIds.filter((id) => columnVisibility[id] !== false)) : null,
+  [compact, allColumnIds, columnVisibility])
   // Sort lives in tablePrefs (like order/size/hidden) so it survives leaving and
   // returning to a kind. Absent prefs.sorting → the view's default; entries are
   // filtered to columns that currently exist (e.g. the aggregated Context column).
@@ -774,14 +819,23 @@ export function ResourceTable<T>({
   }, [pageIndex, pageCount])
 
   const visibleRows = table.getRowModel().rows
-  const scrollRef = useRef<HTMLDivElement>(null)
+  const renderedColumns = table.getVisibleLeafColumns().filter((col) => !compactColumns || compactColumns.has(col.id))
+  const compactStatusWidth = tableWidth < 480 ? 112 : 148
+  const identityColumn = compactColumns?.values().next().value
+  const compactFixedWidth = renderedColumns.reduce((sum, col) => col.id === identityColumn
+    ? sum : sum + (col.id === 'restarts' ? 84 : compactStatusWidth), 0)
+  const renderedWidth = (id: string, fallback: number) => {
+    if (!compact) return fallback
+    if (id === identityColumn) return Math.max(128, tableWidth - 36 - compactFixedWidth)
+    return id === 'restarts' ? 84 : compactStatusWidth
+  }
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 })
-  }, [pageIndex])
+  }, [pageIndex, scrollRef])
   const virtualizer = useVirtualizer({
     count: visibleRows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 33,
+    estimateSize: () => compact ? 49 : 33,
     overscan: 12,
   })
   // The virtualizer re-renders this component on every scroll frame; both
@@ -862,6 +916,81 @@ export function ResourceTable<T>({
   }
   const clearSelection = () => setSelectedKeys(new Set())
 
+  // The identity a row opens as: the view's own mapping (CRs carry their GVR),
+  // or kind, context, namespace and name for built-in kinds.
+  const resourceOf = useCallback((item: Tagged<T>): SelectedResource => {
+    const identity = item as unknown as RowIdentity
+    return rowResource?.(item as unknown as T, item[KLUSTR_CTX]) ?? {
+      kind, context: item[KLUSTR_CTX], namespace: identity.namespace ?? '', name: identity.name ?? '',
+    }
+  }, [rowResource, kind])
+  // One scan per row-model change locates the inspected resource for the row
+  // highlight, the outside-results notice and result navigation. Row ids are
+  // the context/namespace/name identity, so only the matching row is mapped
+  // to a resource to confirm its kind and API version.
+  const inspectedIndex = useMemo(() => {
+    if (!selectedResource) return -1
+    const id = identityKey(selectedResource.context ?? '', selectedResource)
+    const index = selectableRows.findIndex((row) => row.id === id)
+    return index >= 0 && sameResource(selectedResource, resourceOf(selectableRows[index].original)) ? index : -1
+  }, [selectedResource, selectableRows, resourceOf])
+  const inspectedRowId = inspectedIndex >= 0 ? selectableRows[inspectedIndex].id : null
+
+  useEffect(() => {
+    if (!selectedResource || !tableRef.current?.closest('[data-resource-list]')) return
+    // A CR can share its kind name with a built-in list (Istio's Gateway, Flux's
+    // HelmRelease), so a CR belongs only to the list of its own group/resource.
+    const belongs = selectedResource.gvr
+      ? kind === `cr:${selectedResource.gvr.group}/${selectedResource.gvr.resource}`
+      : selectedResource.kind === kind
+    const loaded = resourceContexts.every((ctx) => loadedSet.has(ctx))
+    setOutsideResults(belongs && loaded && inspectedIndex < 0)
+  }, [selectedResource, kind, resourceContexts, loadedSet, inspectedIndex, setOutsideResults, tableRef])
+
+  // Views pass onRowClick inline; depending on its presence only keeps the
+  // navigator from being republished on every parent render.
+  const clickable = !!onRowClick
+  useEffect(() => {
+    if (!setResourceNavigation || !selectedResource || !clickable ||
+      !tableRef.current?.closest('[data-resource-list]')) return
+    const index = inspectedIndex
+    if (index < 0) {
+      setResourceNavigation(null)
+      return
+    }
+    const move = (offset: number) => {
+      const intendedRow = selectableRows[index + offset]
+      if (!intendedRow) return
+      const intendedResource = resourceOf(intendedRow.original)
+      requestNavigation(() => {
+        // Informer updates can move the chosen resource while a draft decision
+        // is open. Preserve its identity, then reveal its current page.
+        const rows = table.getPrePaginationRowModel().rows
+        const target = rows.findIndex((row) => sameResource(intendedResource, resourceOf(row.original)))
+        const pageSize = table.getState().pagination.pageSize
+        handleRowClick((rows[target] ?? intendedRow).original)
+        if (target >= 0) setPageIndex(Math.floor(target / pageSize))
+        requestAnimationFrame(() => {
+          if (target >= 0) virtualizer.scrollToIndex(target % pageSize, { align: 'auto' })
+          // Focus that survived the move (the Next button) stays put; focus
+          // lost with the previous resource's body moves to the inspector.
+          const detail = workspaceInspector(tableRef.current)
+          if (!detail?.contains(document.activeElement)) detail?.focus({ preventScroll: true })
+        })
+      })
+    }
+    const navigation: ResourceNavigation = {
+      resource: selectedResource,
+      index,
+      total: selectableRows.length,
+      previous: index > 0 ? () => move(-1) : null,
+      next: index + 1 < selectableRows.length ? () => move(1) : null,
+    }
+    setResourceNavigation(navigation)
+    return () => setResourceNavigation((current) => current === navigation ? null : current)
+  }, [setResourceNavigation, selectedResource, clickable, inspectedIndex, selectableRows,
+    resourceOf, handleRowClick, requestNavigation, table, virtualizer])
+
   if (activeContexts.length === 0) {
     return (
       <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
@@ -905,9 +1034,28 @@ export function ResourceTable<T>({
   const isNodeKind = kind === 'Node'
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+    <div ref={tableRef} className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+      onKeyDown={(event) => {
+        if (event.defaultPrevented || isEditableTarget(event.target) || event.altKey || event.ctrlKey || event.metaKey) return
+        if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+        const current = (event.target as HTMLElement).closest<HTMLElement>('[data-resource-row]')
+        if (!current || event.target !== current) return
+        event.preventDefault()
+        event.stopPropagation()
+        const index = Math.max(0, Math.min(visibleRows.length - 1,
+          Number(current.dataset.index) + (event.key === 'ArrowDown' ? 1 : -1)))
+        const next = visibleRows[index]
+        if (!next) return
+        virtualizer.scrollToIndex(index, { align: 'auto' })
+        if (selectedResource && onRowClick) {
+          window.clearTimeout(followTimer.current)
+          if (event.repeat) followTimer.current = window.setTimeout(() => handleRowClick(next.original), HELD_KEY_SETTLE_MS)
+          else handleRowClick(next.original)
+        }
+        requestAnimationFrame(() => tableRef.current?.querySelector<HTMLElement>(`[data-resource-row][data-index="${index}"]`)?.focus({ preventScroll: true }))
+      }}>
       {selectedItems.length > 0 && (
-        <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-4 py-2 text-xs">
+        <div className="flex flex-wrap items-center gap-2 border-b border-border bg-muted/40 px-4 py-2 text-xs">
           <span className="shrink-0 font-medium text-foreground">
             {selectedItems.length} selected
           </span>
@@ -1007,15 +1155,15 @@ export function ResourceTable<T>({
           </button>
         </div>
       )}
-      <div className="flex items-center gap-3 border-b border-border px-4 py-2 text-xs text-muted-foreground">
-        <span className="min-w-0">
+      <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-border px-4 py-2 text-xs text-muted-foreground">
+        <span className={narrow ? 'w-full truncate' : 'min-w-0'} title={`${countLabel}${scopeLabel}${contextLabel}`}>
           {countLabel}
           {scopeLabel}
           {contextLabel}
           {hasLoadErrors && ' (incomplete)'}
           {connectionWarnings.length > 0 && ' (possibly outdated)'}
         </span>
-        <div className="relative ml-auto w-64 max-w-full">
+        <div className={`relative min-w-24 ${narrow ? 'flex-1' : 'ml-auto w-64 max-w-full'}`}>
           <Search className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/70" />
           <input
             ref={filterRef}
@@ -1046,7 +1194,10 @@ export function ResourceTable<T>({
             </button>
           )}
         </div>
-        <ColumnControls table={table} onReset={() => resetPrefs(kind)} />
+        {narrow && <Button size="sm" variant="ghost" className="h-7 shrink-0 px-2 text-xs"
+          title={compact ? 'Show all columns' : 'Use compact columns'}
+          onClick={() => setFullColumns(!fullColumns)}>{compact ? 'Full columns' : 'Compact'}</Button>}
+        {!compact && <ColumnControls table={table} onReset={() => resetPrefs(kind)} />}
       </div>
       {connectionWarnings.length > 0 && (
         <div
@@ -1098,24 +1249,24 @@ export function ResourceTable<T>({
           </ul>
         </div>
       )}
-      <div ref={scrollRef} className="flex-1 overflow-auto">
+      <div ref={attachScroll} className="flex-1 overflow-auto">
         <table
           className="border-collapse text-sm"
           style={{
             width: '100%',
-            minWidth: table.getTotalSize(),
+            minWidth: compact ? 36 + renderedColumns.reduce((sum, col) => sum + renderedWidth(col.id, col.getSize()), 0) : table.getTotalSize(),
             tableLayout: 'fixed',
           }}
         >
           <colgroup>
             <col style={{ width: 36 }} />
-            {table.getVisibleLeafColumns().map((col) => (
+            {renderedColumns.map((col) => (
               <col
                 key={col.id}
                 ref={(el) => {
                   colRefs.current[col.id] = el
                 }}
-                style={{ width: col.getSize() }}
+                style={{ width: renderedWidth(col.id, col.getSize()) }}
               />
             ))}
             <col />
@@ -1130,7 +1281,7 @@ export function ResourceTable<T>({
                     aria-label="Select all visible"
                   />
                 </th>
-                {hg.headers.map((h) => {
+                {hg.headers.filter((h) => !compactColumns || compactColumns.has(h.column.id)).map((h) => {
                   const sorted = h.column.getIsSorted()
                   const canSort = h.column.getCanSort()
                   const colId = h.column.id
@@ -1141,7 +1292,7 @@ export function ResourceTable<T>({
                     dragColId !== null && dropTargetColId === colId && dragColId !== colId
                   const headerContent = (
                     <>
-                      <span className="truncate">
+                      <span className="truncate" title={typeof h.column.columnDef.header === 'string' ? h.column.columnDef.header : colId}>
                         {flexRender(h.column.columnDef.header, h.getContext())}
                       </span>
                       {canSort &&
@@ -1206,7 +1357,8 @@ export function ResourceTable<T>({
                         setDropTargetColId(null)
                       }}
                       className={[
-                        'group relative select-none overflow-hidden px-3 py-2 text-left text-xs font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground',
+                        'group relative select-none overflow-hidden py-2 text-left text-xs font-medium uppercase tracking-wide text-muted-foreground hover:text-foreground',
+                        compact ? 'px-2' : 'px-3',
                         isDragging ? 'opacity-40' : '',
                         isDropTarget
                           ? 'before:absolute before:left-0 before:top-0 before:h-full before:w-0.5 before:bg-primary before:content-[""]'
@@ -1261,7 +1413,7 @@ export function ResourceTable<T>({
                           </DropdownMenu>
                         )}
                       </span>
-                      <span
+                      {!compact && <span
                         draggable={false}
                         onMouseDown={startResize(h.column.id)}
                         onTouchStart={startResize(h.column.id)}
@@ -1272,7 +1424,7 @@ export function ResourceTable<T>({
                           'group-hover:after:opacity-100',
                           'data-[resizing=true]:after:bg-primary data-[resizing=true]:after:opacity-100',
                         ].join(' ')}
-                      />
+                      />}
                     </th>
                   )
                 })}
@@ -1287,7 +1439,7 @@ export function ResourceTable<T>({
                   <td className="px-2 py-1.5 align-middle">
                     <Skeleton className="size-4 rounded-sm" />
                   </td>
-                  {table.getVisibleLeafColumns().map((col, ci) => (
+                  {renderedColumns.map((col, ci) => (
                     <td key={col.id} className="px-3 py-1.5 align-middle">
                       <Skeleton
                         className="h-3.5"
@@ -1303,16 +1455,26 @@ export function ResourceTable<T>({
             ) : visibleRows.length === 0 ? (
               <tr>
                 <td
-                  colSpan={tableColumns.length + 2}
+                  colSpan={renderedColumns.length + 2}
                   className="px-3 py-8 text-center text-sm text-muted-foreground"
                 >
                   {hasLoadErrors
                     ? `Could not load a complete list of ${noun.plural}.`
                     : connectionWarnings.length > 0
                       ? `No cached ${noun.plural} for the current selection.`
-                      : appliedFilter
-                        ? `No ${noun.plural} matching "${appliedFilter}".`
+                      : total > 0 && (appliedFilter || hasHeaderFilter)
+                        ? appliedFilter
+                          ? `No ${noun.plural} matching "${appliedFilter}".`
+                          : `No ${noun.plural} match the current filters.`
                         : `No ${noun.plural}${scope === 'namespaced' && selectedNamespaces.length > 0 ? scopeLabel : ''}.`}
+                  {!hasLoadErrors && connectionWarnings.length === 0 && total > 0 && (appliedFilter || hasHeaderFilter) && (
+                    <div className="mt-3">
+                      <Button size="sm" variant="outline" onClick={() => {
+                        setFilter('')
+                        setHeaderFilterValues({})
+                      }}>Clear filters</Button>
+                    </div>
+                  )}
                 </td>
               </tr>
             ) : (
@@ -1323,7 +1485,7 @@ export function ResourceTable<T>({
                   virtualItems.length > 0
                     ? virtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end
                     : 0
-                const spacerSpan = table.getVisibleLeafColumns().length + 2
+                const spacerSpan = renderedColumns.length + 2
                 return (
                   <>
                     {padTop > 0 && (
@@ -1347,6 +1509,8 @@ export function ResourceTable<T>({
                           columnOrder={columnOrder}
                           columnVisibility={columnVisibility}
                           isSelected={rowKey !== null && selectedKeys.has(rowKey)}
+                          inspected={row.id === inspectedRowId}
+                          compactColumns={compactColumns}
                           flashing={rowKey !== null && flashKey === rowKey}
                           clickable={!!onRowClick}
                           onRowClick={handleRowClick}
@@ -1369,7 +1533,7 @@ export function ResourceTable<T>({
         </table>
       </div>
       {allLoaded && filteredCount > 0 && (
-        <div className="flex min-w-0 items-center gap-3 border-t border-border px-4 py-1.5 text-xs text-muted-foreground">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 border-t border-border px-4 py-1.5 text-xs text-muted-foreground">
           <div className="flex items-center gap-1.5">
             <span>Rows per page</span>
             <DropdownMenu>

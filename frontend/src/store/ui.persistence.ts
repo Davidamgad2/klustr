@@ -14,6 +14,9 @@ import {
 } from '@/features/_shared/themes'
 import {
   MAX_TAGS_PER_CONTEXT,
+  DETAIL_WIDTH_DEFAULT,
+  DETAIL_WIDTH_MIN,
+  DETAIL_WIDTH_MAX,
   SIDEBAR_WIDTH_DEFAULT,
   SIDEBAR_WIDTH_MAX,
   SIDEBAR_WIDTH_MIN,
@@ -31,6 +34,7 @@ export const EXPANDED_CRD_GROUPS_KEY = 'klustr-expanded-crd-groups'
 export const HIDDEN_SIDEBAR_ITEMS_KEY = 'klustr-hidden-sidebar-items'
 export const SIDEBAR_MODE_KEY = 'klustr-sidebar-mode'
 export const SIDEBAR_WIDTH_KEY = 'klustr-sidebar-width'
+export const DETAIL_WIDTH_KEY = 'klustr-detail-width'
 export const DEFAULT_CONTEXT_KEY = 'klustr-default-context'
 export const AGGREGATED_CONTEXTS_KEY = 'klustr-aggregated-contexts'
 export const NAMESPACES_BY_CONTEXT_KEY = 'klustr-namespaces-by-context'
@@ -40,6 +44,30 @@ export const CUSTOM_TAGS_KEY = 'klustr-custom-tags'
 export const CONTEXT_GROUPS_KEY = 'klustr-context-groups'
 export const LAST_SESSION_KEY = 'klustr-last-session'
 export const LOG_WRAP_KEY = 'klustr-log-wrap'
+
+// Panel widths: whole pixels within bounds, with unreadable values falling
+// back to the default.
+function clampWidth(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback
+  return Math.min(max, Math.max(min, Math.round(value)))
+}
+
+function readWidth(key: string, clamp: (value: number) => number, fallback: number): number {
+  const raw = localStorage.getItem(key)
+  return raw ? clamp(Number(raw)) : fallback
+}
+
+export function clampDetailWidth(value: number): number {
+  return clampWidth(value, DETAIL_WIDTH_MIN, DETAIL_WIDTH_MAX, DETAIL_WIDTH_DEFAULT)
+}
+
+export function readDetailWidth(): number {
+  return readWidth(DETAIL_WIDTH_KEY, clampDetailWidth, DETAIL_WIDTH_DEFAULT)
+}
+
+export function persistDetailWidth(value: number) {
+  localStorage.setItem(DETAIL_WIDTH_KEY, String(value))
+}
 
 const VALID_COLORS: ReadonlySet<TagColor> = new Set([
   'rose',
@@ -106,15 +134,11 @@ export function persistSidebarMode(mode: SidebarMode) {
 }
 
 export function clampSidebarWidth(value: number): number {
-  return Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, value))
+  return clampWidth(value, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_DEFAULT)
 }
 
 export function readSidebarWidth(): number {
-  const raw = localStorage.getItem(SIDEBAR_WIDTH_KEY)
-  if (!raw) return SIDEBAR_WIDTH_DEFAULT
-  const parsed = Number.parseInt(raw, 10)
-  if (!Number.isFinite(parsed)) return SIDEBAR_WIDTH_DEFAULT
-  return clampSidebarWidth(parsed)
+  return readWidth(SIDEBAR_WIDTH_KEY, clampSidebarWidth, SIDEBAR_WIDTH_DEFAULT)
 }
 
 export function persistSidebarWidth(px: number) {

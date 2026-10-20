@@ -12,11 +12,13 @@ import {
   type LastSession,
   type PendingAction,
   type ResourceView,
+  type ResourceHistoryEntry,
   type SelectedResource,
   type SidebarMode,
 } from './ui.types'
 import {
   applyThemeClasses,
+  clampDetailWidth,
   clampSidebarWidth,
   isValidGroupColor,
   persistAggregatedContexts,
@@ -30,6 +32,7 @@ import {
   persistLastSession,
   persistSidebarMode,
   persistSidebarWidth,
+  persistDetailWidth,
   persistThemeId,
   readAggregatedContexts,
   readNamespacesByContext,
@@ -49,6 +52,7 @@ import {
   readSavedThemeId,
   readSidebarMode,
   readSidebarWidth,
+  readDetailWidth,
   systemThemeId,
 } from './ui.persistence'
 
@@ -87,8 +91,16 @@ type UIState = {
   selectedCRDKey: string | null
   selectedResource: SelectedResource | null
   lastSelectedResource: SelectedResource | null
-  resourceNavStack: SelectedResource[]
+  resourceNavStack: ResourceHistoryEntry[]
   requestedTab: DetailTab | null
+  detailRequestId: number
+  activeDetailTab: string
+  detailWidth: number
+  detailExpanded: boolean
+  detailDirty: boolean
+  detailOutsideResults: boolean
+  pendingDetailNavigation: (() => void) | null
+  detailDiscardRequest: number
   pendingAction: PendingAction | null
   themeId: ThemeId
   sidebarMode: SidebarMode
@@ -114,8 +126,19 @@ type UIState = {
   setSelectedView: (view: ResourceView) => void
   setSelectedCRD: (key: string | null) => void
   setSelectedResource: (resource: SelectedResource | null) => void
+  closeRemovedResource: (resource: SelectedResource) => void
+  openResourceInView: (view: ResourceView, resource: SelectedResource) => void
   openResource: (resource: SelectedResource, tab?: DetailTab) => void
+  openResourceFromList: (resource: SelectedResource, tab?: DetailTab) => void
   goBackResource: () => void
+  setActiveDetailTab: (tab: string) => void
+  setDetailWidth: (width: number) => void
+  setDetailExpanded: (expanded: boolean) => void
+  setDetailDirty: (dirty: boolean) => void
+  setDetailOutsideResults: (outside: boolean) => void
+  requestDetailNavigation: (navigate: () => void) => void
+  cancelDetailNavigation: () => void
+  confirmDetailNavigation: () => void
   setPendingAction: (action: PendingAction | null) => void
   setTheme: (id: ThemeId) => void
   toggleSidebarMode: () => void
@@ -170,6 +193,29 @@ function sameList(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((n, i) => b[i] === n)
 }
 
+// Re-selecting the inspected resource keeps its object unless a row snapshot
+// field changed, so the memoized inspector and the list's effects don't re-run.
+function sameSnapshot(a: SelectedResource, b: SelectedResource): boolean {
+  return a.suspended === b.suspended && a.logContainer === b.logContainer
+}
+
+// Terminal tabs open a session, so they never reconnect on their own when
+// moving between resources or returning through history. Every other tab is
+// a reading tab, including integration tabs added later; each detail body
+// falls back to its default for a tab it does not have.
+const CONNECTING_TABS: ReadonlySet<string> = new Set<DetailTab>(['exec', 'shell'])
+
+function readingDetailTab(tab: string): DetailTab | null {
+  return CONNECTING_TABS.has(tab) ? null : (tab as DetailTab)
+}
+
+function retainedDetailTab(s: UIState, resource: SelectedResource | null): DetailTab | null {
+  const current = s.selectedResource
+  if (!current || !resource || current.kind !== resource.kind ||
+    current.gvr?.group !== resource.gvr?.group || current.gvr?.resource !== resource.gvr?.resource) return null
+  return readingDetailTab(s.activeDetailTab)
+}
+
 type NormalizedContexts = {
   selectedContext: string | null
   aggregatedContexts: string[]
@@ -178,6 +224,9 @@ type NormalizedContexts = {
   selectedCRDKey: string | null
   selectedResource: SelectedResource | null
   lastSelectedResource: SelectedResource | null
+  resourceNavStack: ResourceHistoryEntry[]
+  requestedTab: DetailTab | null
+  detailOutsideResults: boolean
 }
 
 // normalizeContexts also re-applies the namespace selection saved for the
@@ -200,6 +249,9 @@ function normalizeContexts(
     selectedCRDKey: null,
     selectedResource: null,
     lastSelectedResource: null,
+    resourceNavStack: [],
+    requestedTab: null,
+    detailOutsideResults: false,
   }
 }
 
@@ -219,7 +271,40 @@ function applyNamespaceSelection(
   return { selectedNamespaces: next, namespacesByContext: map }
 }
 
-export const useUIStore = create<UIState>((set) => {
+export const useUIStore = create<UIState>((set, get) => {
+  const navigate = (action: () => void) => {
+    if (!get().detailDirty) action()
+    // The discard dialog blocks clicks, so a request arriving while it is open
+    // comes from async work (a resolved lookup) and must not replace the
+    // destination the user is deciding on.
+    else if (!get().pendingDetailNavigation) set({ pendingDetailNavigation: action })
+  }
+  // Following a reference from the inspector records the current resource for
+  // Back. Opening another row from the list starts over, as a row click does.
+  const openWithTab = (resource: SelectedResource, tab: DetailTab | undefined, recordHistory: boolean) => {
+    const current = get().selectedResource
+    const containerRequest = tab === 'logs' && resource.logContainer !== undefined
+    if (current && sameResource(current, resource) && (!tab || tab === get().activeDetailTab) && !containerRequest) {
+      if (!sameSnapshot(current, resource)) set({ selectedResource: resource })
+      return
+    }
+    navigate(() => set((s) => {
+      const same = !!s.selectedResource && sameResource(s.selectedResource, resource)
+      return {
+        resourceNavStack:
+          same ? s.resourceNavStack
+            : recordHistory && s.selectedResource
+              ? [...s.resourceNavStack, { resource: s.selectedResource, tab: readingDetailTab(s.activeDetailTab) }]
+              : [],
+        selectedResource: resource,
+        detailOutsideResults: false,
+        lastSelectedResource: resource,
+        requestedTab: tab ?? retainedDetailTab(s, resource),
+        // Repeated requests must remain observable after manual tab/container changes.
+        detailRequestId: s.detailRequestId + 1,
+      }
+    }))
+  }
   const saved = readSavedThemeId()
   const initialThemeId = saved ?? systemThemeId()
   applyThemeClasses(getTheme(initialThemeId))
@@ -269,6 +354,14 @@ export const useUIStore = create<UIState>((set) => {
     lastSelectedResource: null,
     resourceNavStack: [],
     requestedTab: null,
+    detailRequestId: 0,
+    activeDetailTab: 'overview',
+    detailWidth: readDetailWidth(),
+    detailExpanded: false,
+    detailDirty: false,
+    detailOutsideResults: false,
+    pendingDetailNavigation: null,
+    detailDiscardRequest: 0,
     pendingAction: null,
     themeId: initialThemeId,
     sidebarMode: readSidebarMode(),
@@ -281,8 +374,9 @@ export const useUIStore = create<UIState>((set) => {
     customTags: readCustomTags(),
     contextGroups: readContextGroups(),
     lastSession: readLastSession(),
-    setSelectedContext: (name) =>
-      set((s) => {
+    setSelectedContext: (name) => {
+      if (sameList(name ? [name] : [], effectiveContextList(get()))) return
+      navigate(() => set((s) => {
         const next = name ? [name] : []
         if (sameList(next, effectiveContextList(s))) return s
         const out = normalizeContexts(next, s.namespacesByContext)
@@ -292,11 +386,13 @@ export const useUIStore = create<UIState>((set) => {
           return { ...out, lastSession: ls }
         }
         return out
-      }),
-    setAggregatedContexts: (names, groupId) =>
-      set((s) => {
-        const next = dedupeSorted(names)
-        const nextGroup = groupId ?? null
+      }))
+    },
+    setAggregatedContexts: (names, groupId) => {
+      const next = dedupeSorted(names)
+      const nextGroup = groupId ?? null
+      if (sameList(next, effectiveContextList(get())) && get().activeGroupId === nextGroup) return
+      navigate(() => set((s) => {
         if (sameList(next, effectiveContextList(s)) && s.activeGroupId === nextGroup) return s
         const out = { ...normalizeContexts(next, s.namespacesByContext), activeGroupId: nextGroup }
         if (next.length > 0) {
@@ -305,12 +401,13 @@ export const useUIStore = create<UIState>((set) => {
           return { ...out, lastSession: ls }
         }
         return out
-      }),
+      }))
+    },
     clearLastSession: () => {
       persistLastSession(null)
       set({ lastSession: null })
     },
-    toggleAggregatedContext: (name) =>
+    toggleAggregatedContext: (name) => navigate(() =>
       set((s) => {
         const current = effectiveContextList(s)
         const next = current.includes(name)
@@ -318,12 +415,14 @@ export const useUIStore = create<UIState>((set) => {
           : dedupeSorted([...current, name])
         if (sameList(next, current)) return s
         return normalizeContexts(next, s.namespacesByContext)
-      }),
-    clearAggregatedContexts: () =>
-      set((s) => {
+      })),
+    clearAggregatedContexts: () => {
+      if (effectiveContextList(get()).length === 0) return
+      navigate(() => set((s) => {
         if (effectiveContextList(s).length === 0) return s
         return normalizeContexts([], s.namespacesByContext)
-      }),
+      }))
+    },
     setSelectedNamespaces: (names) =>
       set((s) => applyNamespaceSelection(s, dedupeSorted(names))),
     toggleSelectedNamespace: (name) =>
@@ -343,51 +442,116 @@ export const useUIStore = create<UIState>((set) => {
       persistLogWrap(value)
       set({ logWrap: value })
     },
-    setSelectedView: (view) =>
-      set({
+    setSelectedView: (view) => {
+      if (get().selectedView === view && get().selectedCRDKey === null) return
+      navigate(() => set({
         selectedView: view,
         selectedCRDKey: null,
         selectedResource: null,
         lastSelectedResource: null,
         resourceNavStack: [],
         requestedTab: null,
-      }),
-    setSelectedCRD: (key) =>
-      set({
+      }))
+    },
+    setSelectedCRD: (key) => {
+      if (get().selectedCRDKey === key) return
+      navigate(() => set({
         selectedCRDKey: key,
         selectedResource: null,
         lastSelectedResource: null,
         resourceNavStack: [],
         requestedTab: null,
-      }),
-    setSelectedResource: (resource) =>
-      set((s) => ({
+      }))
+    },
+    setSelectedResource: (resource) => {
+      const current = get().selectedResource
+      if (resource && current && sameResource(resource, current)) {
+        if (!sameSnapshot(current, resource)) set({ selectedResource: resource })
+        return
+      }
+      navigate(() => set((s) => ({
         selectedResource: resource,
+        detailOutsideResults: false,
         lastSelectedResource: resource ?? s.selectedResource ?? s.lastSelectedResource,
         resourceNavStack: [],
-        requestedTab: null,
-      })),
-    openResource: (resource, tab) =>
-      set((s) => ({
-        resourceNavStack:
-          s.selectedResource && !sameResource(s.selectedResource, resource)
-            ? [...s.resourceNavStack, s.selectedResource]
-            : s.resourceNavStack,
+        requestedTab: retainedDetailTab(s, resource),
+        detailRequestId: s.detailRequestId + 1,
+      })))
+    },
+    closeRemovedResource: (resource) =>
+      set((s) => {
+        if (!s.selectedResource || !sameResource(s.selectedResource, resource)) return s
+        // The object is gone, so its draft can no longer be applied: close
+        // without the draft prompt, and drop a prompt already on screen.
+        return {
+          selectedResource: null,
+          lastSelectedResource: s.selectedResource,
+          resourceNavStack: [],
+          requestedTab: null,
+          detailRequestId: s.detailRequestId + 1,
+          detailOutsideResults: false,
+          detailDirty: false,
+          pendingDetailNavigation: null,
+        }
+      }),
+    openResourceInView: (view, resource) => {
+      const s = get()
+      if (s.selectedView === view && s.selectedCRDKey === null) {
+        s.setSelectedResource(resource)
+        return
+      }
+      // View and resource are one destination, including after a draft decision.
+      navigate(() => set((s) => ({
+        selectedView: view,
+        selectedCRDKey: null,
         selectedResource: resource,
         lastSelectedResource: resource,
-        requestedTab: tab ?? null,
-      })),
-    goBackResource: () =>
-      set((s) => {
+        resourceNavStack: [],
+        requestedTab: null,
+        detailRequestId: s.detailRequestId + 1,
+        detailOutsideResults: false,
+      })))
+    },
+    openResource: (resource, tab) => openWithTab(resource, tab, true),
+    openResourceFromList: (resource, tab) => openWithTab(resource, tab, false),
+    goBackResource: () => {
+      if (get().resourceNavStack.length === 0) return
+      navigate(() => set((s) => {
         if (s.resourceNavStack.length === 0) return s
         const next = s.resourceNavStack[s.resourceNavStack.length - 1]
         return {
-          selectedResource: next,
-          lastSelectedResource: next,
+          selectedResource: next.resource,
+          lastSelectedResource: next.resource,
           resourceNavStack: s.resourceNavStack.slice(0, -1),
-          requestedTab: null,
+          requestedTab: next.tab,
+          detailRequestId: s.detailRequestId + 1,
+          detailOutsideResults: false,
         }
-      }),
+      }))
+    },
+    setActiveDetailTab: (activeDetailTab) => set({ activeDetailTab }),
+    setDetailWidth: (value) => {
+      const detailWidth = clampDetailWidth(value)
+      persistDetailWidth(detailWidth)
+      set({ detailWidth })
+    },
+    setDetailExpanded: (detailExpanded) => set({ detailExpanded }),
+    setDetailDirty: (detailDirty) => set({ detailDirty }),
+    // Lists report this on every informer update; an unchanged value must not
+    // notify every store subscriber.
+    setDetailOutsideResults: (detailOutsideResults) => {
+      if (get().detailOutsideResults !== detailOutsideResults) set({ detailOutsideResults })
+    },
+    requestDetailNavigation: navigate,
+    cancelDetailNavigation: () => set({ pendingDetailNavigation: null }),
+    confirmDetailNavigation: () => {
+      const action = get().pendingDetailNavigation
+      // The editor drops its draft on this signal: a destination that keeps it
+      // mounted (an unavailable tab, a no-op closure) must not leave an
+      // unguarded draft behind.
+      set((s) => ({ detailDirty: false, pendingDetailNavigation: null, detailDiscardRequest: s.detailDiscardRequest + 1 }))
+      action?.()
+    },
     setPendingAction: (action) => set({ pendingAction: action }),
     setTheme: (id) => {
       if (followingSystem) {
