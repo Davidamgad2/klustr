@@ -12,6 +12,8 @@ import type { LogLine } from '@/features/_shared/logView'
 import { useLogTerminal } from '@/features/_shared/useLogTerminal'
 import { useUIStore } from '@/store/ui'
 
+// Applied per container, so the lines loaded multiply by every pod and
+// container; the pod view keeps 10,000 lines and the whole log.
 const TAIL_OPTIONS = [
   { value: '50', label: '50 lines' },
   { value: '200', label: '200 lines' },
